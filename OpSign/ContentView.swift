@@ -1,8 +1,35 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-enum PickTarget {
+enum PickTarget: Identifiable {
     case ipa, p12, profile
+    var id: Int { hashValue }
+}
+
+struct DocumentPicker: UIViewControllerRepresentable {
+    let onPick: (URL) -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+        picker.allowsMultipleSelection = false
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ vc: UIDocumentPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
+
+    class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onPick: (URL) -> Void
+        init(onPick: @escaping (URL) -> Void) { self.onPick = onPick }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            if let url = urls.first {
+                DispatchQueue.main.async { self.onPick(url) }
+            }
+        }
+    }
 }
 
 struct ContentView: View {
@@ -10,8 +37,7 @@ struct ContentView: View {
     @State private var p12URL: URL?
     @State private var profileURL: URL?
     @State private var password = ""
-    @State private var target: PickTarget = .ipa
-    @State private var showPicker = false
+    @State private var target: PickTarget?
     @State private var showAlert = false
 
     var isReady: Bool {
@@ -42,15 +68,12 @@ struct ContentView: View {
 
                     fileCard(title: "IPA файл", icon: "shippingbox.fill", url: ipaURL) {
                         target = .ipa
-                        showPicker = true
                     }
                     fileCard(title: "Сертификат .p12", icon: "key.fill", url: p12URL) {
                         target = .p12
-                        showPicker = true
                     }
                     fileCard(title: "Профиль .mobileprovision", icon: "doc.badge.gearshape.fill", url: profileURL) {
                         target = .profile
-                        showPicker = true
                     }
 
                     HStack(spacing: 14) {
@@ -87,17 +110,14 @@ struct ContentView: View {
                 .padding()
             }
         }
-        .fileImporter(
-            isPresented: $showPicker,
-            allowedContentTypes: [.item],
-            allowsMultipleSelection: false
-        ) { result in
-            if case .success(let urls) = result, let url = urls.first {
-                switch target {
+        .sheet(item: $target) { current in
+            DocumentPicker { url in
+                switch current {
                 case .ipa: ipaURL = url
                 case .p12: p12URL = url
                 case .profile: profileURL = url
                 }
+                target = nil
             }
         }
         .alert("Скоро", isPresented: $showAlert) {
