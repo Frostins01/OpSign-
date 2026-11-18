@@ -6,6 +6,7 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -15,6 +16,13 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      - name: Resolve packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project OpSign.xcodeproj \
+            -scheme OpSign \
+            -clonedSourcePackagesDirPath SourcePackages
+
       - name: Build
         run: |
           xcodebuild \
@@ -23,6 +31,9 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build \
+            -clonedSourcePackagesDirPath SourcePackages \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
