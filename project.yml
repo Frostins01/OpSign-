@@ -1,34 +1,51 @@
-name: OpSign
-options:
-  bundleIdPrefix: com.opsign
-  deploymentTarget:
-    iOS: "16.0"
-packages:
-  Zsign:
-    url: https://github.com/xtool-org/zsign
-    from: "1.9.0"
-  ZIPFoundation:
-    url: https://github.com/weichsel/ZIPFoundation
-    from: "0.9.19"
-targets:
-  OpSign:
-    type: application
-    platform: iOS
-    sources:
-      - OpSign
-    dependencies:
-      - package: Zsign
-        product: Zupersign
-      - package: ZIPFoundation
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.opsign.app
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: OpSign
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UIFileSharingEnabled: YES
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
-        TARGETED_DEVICE_FAMILY: "1"
-        SWIFT_VERSION: "5.0"
+name: Build IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Resolve packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project OpSign.xcodeproj \
+            -scheme OpSign \
+            -clonedSourcePackagesDirPath SourcePackages
+
+      - name: Build
+        run: |
+          xcodebuild \
+            -project OpSign.xcodeproj \
+            -scheme OpSign \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            -clonedSourcePackagesDirPath SourcePackages \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package IPA
+        run: |
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/OpSign.app Payload/
+          zip -r OpSign.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpSign-ipa
+          path: OpSign.ipa
