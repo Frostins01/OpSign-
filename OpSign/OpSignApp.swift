@@ -2,10 +2,13 @@ import SwiftUI
 
 @main
 struct OpSignApp: App {
+    @StateObject private var store = AppStore()
+
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .preferredColorScheme(.dark)
+                .environmentObject(store)
+                .preferredColorScheme(store.theme.scheme)
         }
     }
 }
