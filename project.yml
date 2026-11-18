@@ -1,0 +1,21 @@
+name: OpSign
+options:
+  bundleIdPrefix: com.opsign
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  OpSign:
+    type: application
+    platform: iOS
+    sources:
+      - OpSign
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.opsign.app
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: OpSign
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
