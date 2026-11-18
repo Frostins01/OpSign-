@@ -4,9 +4,12 @@ options:
   deploymentTarget:
     iOS: "16.0"
 packages:
-  OpenSSL:
-    url: https://github.com/krzyzanowskim/OpenSSL
-    from: "3.3.2000"
+  Zsign:
+    url: https://github.com/xtool-org/zsign
+    from: "1.9.0"
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation
+    from: "0.9.19"
 targets:
   OpSign:
     type: application
@@ -14,7 +17,9 @@ targets:
     sources:
       - OpSign
     dependencies:
-      - package: OpenSSL
+      - package: Zsign
+        product: Zupersign
+      - package: ZIPFoundation
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.opsign.app
