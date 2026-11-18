@@ -1,6 +1,9 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import Security
+#if canImport(OpenSSL)
+import OpenSSL
+#endif
 
 // MARK: - Темы
 
@@ -101,13 +104,31 @@ struct FileCard: View {
 enum PickKind: Int, Identifiable {
     case ipa, p12, profile
     var id: Int { rawValue }
+
+    var ext: String {
+        switch self {
+        case .ipa: return "ipa"
+        case .p12: return "p12"
+        case .profile: return "mobileprovision"
+        }
+    }
+
+    var types: [UTType] {
+        if let t = UTType(filenameExtension: ext) { return [t] }
+        return [.item]
+    }
+
+    func accepts(_ url: URL) -> Bool {
+        url.pathExtension.lowercased() == ext
+    }
 }
 
 struct DocumentPicker: UIViewControllerRepresentable {
+    let kind: PickKind
     let onPick: (URL) -> Void
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: kind.types, asCopy: true)
         picker.allowsMultipleSelection = false
         picker.delegate = context.coordinator
         return picker
@@ -127,6 +148,52 @@ struct DocumentPicker: UIViewControllerRepresentable {
             }
         }
     }
+}
+
+// MARK: - Проверка .p12 через OpenSSL
+
+func opensslCheck(_ data: Data, _ pass: String) -> (ok: Bool, message: String) {
+    #if canImport(OpenSSL)
+    var out: (ok: Bool, message: String) = (false, "Неизвестная ошибка")
+    data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+        guard let base = raw.bindMemory(to: UInt8.self).baseAddress else {
+            out = (false, "Файл пустой")
+            return
+        }
+        var ptr: UnsafePointer<UInt8>? = base
+        guard let p12 = d2i_PKCS12(nil, &ptr, data.count) else {
+            out = (false, "Структура файла не похожа на .p12. Скорее всего, выбран не тот файл или он повреждён.")
+            return
+        }
+        defer { PKCS12_free(p12) }
+
+        if PKCS12_verify_mac(p12, pass, -1) != 1 {
+            out = (false, "Неверный пароль от .p12. Проверь пароль (нажми на глазок рядом с полем).")
+            return
+        }
+
+        var pkey: OpaquePointer?
+        var cert: OpaquePointer?
+        if PKCS12_parse(p12, pass, &pkey, &cert, nil) != 1 {
+            out = (false, "Пароль верный, но файл использует устаревший алгоритм шифрования. Выпусти или пересохрани .p12 заново.")
+            return
+        }
+
+        var name = "сертификат"
+        if let c = cert, let subj = X509_get_subject_name(c) {
+            var buf = [CChar](repeating: 0, count: 256)
+            if X509_NAME_get_text_by_NID(subj, NID_commonName, &buf, 256) > 0 {
+                name = String(cString: buf)
+            }
+        }
+        if let c = cert { X509_free(c) }
+        if let k = pkey { EVP_PKEY_free(k) }
+        out = (true, "Пароль верный: \(name)")
+    }
+    return out
+    #else
+    return (false, "OpenSSL не подключён в сборке.")
+    #endif
 }
 
 // MARK: - Хранилище
@@ -221,27 +288,27 @@ final class AppStore: ObservableObject {
             return (false, "Файл .p12 слишком маленький (\(data.count) байт). Скорее всего, выбран не тот файл.")
         }
         let pass = password.trimmingCharacters(in: .whitespacesAndNewlines)
+        if pass.isEmpty {
+            return (false, "Введи пароль от .p12 в поле выше.")
+        }
+
+        // 1. Системная проверка iOS (старые форматы)
         var items: CFArray?
         let options = [kSecImportExportPassphrase as String: pass] as CFDictionary
         let status = SecPKCS12Import(data as CFData, options, &items)
+        if status == errSecSuccess,
+           let arr = items as? [[String: Any]],
+           let first = arr.first,
+           let identityAny = first[kSecImportItemIdentity as String] {
+            let identity = identityAny as! SecIdentity
+            var cert: SecCertificate?
+            SecIdentityCopyCertificate(identity, &cert)
+            let name = cert.flatMap { SecCertificateCopySubjectSummary($0) as String? } ?? "сертификат"
+            return (true, "Пароль верный: \(name)")
+        }
 
-        if status == errSecAuthFailed {
-            return (false, "Неверный пароль (код \(status)). Введи пароль заново вручную.")
-        }
-        if status == errSecDecode {
-            return (false, "iOS не смогла прочитать .p12 (код \(status), размер \(data.count) байт). Либо файл повреждён, либо он в новом формате шифрования, который системная проверка не понимает. Для подписи через zsign такой файл может подойти.")
-        }
-        guard status == errSecSuccess,
-              let arr = items as? [[String: Any]],
-              let first = arr.first,
-              let identityAny = first[kSecImportItemIdentity as String] else {
-            return (false, "Не удалось прочитать .p12 (код \(status))")
-        }
-        let identity = identityAny as! SecIdentity
-        var cert: SecCertificate?
-        SecIdentityCopyCertificate(identity, &cert)
-        let name = cert.flatMap { SecCertificateCopySubjectSummary($0) as String? } ?? "сертификат"
-        return (true, "Пароль верный: \(name)")
+        // 2. Если iOS не справилась, проверяем через OpenSSL (новые форматы)
+        return opensslCheck(data, pass)
     }
 
     func profileInfo() -> (name: String, expires: Date)? {
@@ -383,9 +450,14 @@ struct SignView: View {
             }
         }
         .sheet(isPresented: $showPicker) {
-            DocumentPicker { url in
-                ipaURL = url
+            DocumentPicker(kind: .ipa) { url in
                 showPicker = false
+                if PickKind.ipa.accepts(url) {
+                    ipaURL = url
+                    errorText = nil
+                } else {
+                    errorText = "Нужен файл с расширением .ipa"
+                }
             }
         }
     }
@@ -560,6 +632,7 @@ struct SettingsView: View {
     @State private var errorText: String?
     @State private var checkMessage: String?
     @State private var checkOK = false
+    @State private var showPassword = false
 
     var t: AppTheme { store.theme }
 
@@ -577,12 +650,12 @@ struct SettingsView: View {
                     sectionTitle("Сертификат")
 
                     FileCard(theme: t, title: "Сертификат .p12", icon: "key.fill",
-                             subtitle: store.p12Name ?? "Не выбран",
+                             subtitle: store.p12Name ?? "Не выбран (только .p12)",
                              done: store.p12Name != nil) {
                         picking = .p12
                     }
                     FileCard(theme: t, title: "Профиль .mobileprovision", icon: "doc.badge.gearshape.fill",
-                             subtitle: store.profileName ?? "Не выбран",
+                             subtitle: store.profileName ?? "Не выбран (только .mobileprovision)",
                              done: store.profileName != nil) {
                         picking = .profile
                     }
@@ -592,8 +665,25 @@ struct SettingsView: View {
                             .font(.title2)
                             .foregroundColor(t.accent)
                             .frame(width: 32)
-                        SecureField("Пароль от .p12", text: $store.password)
-                            .foregroundColor(t.text)
+                        Group {
+                            if showPassword {
+                                TextField(text: $store.password,
+                                          prompt: Text("Пароль от .p12").foregroundColor(t.subtext)) { EmptyView() }
+                            } else {
+                                SecureField(text: $store.password,
+                                            prompt: Text("Пароль от .p12").foregroundColor(t.subtext)) { EmptyView() }
+                            }
+                        }
+                        .foregroundColor(t.text)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+
+                        Button {
+                            showPassword.toggle()
+                        } label: {
+                            Image(systemName: showPassword ? "eye.slash.fill" : "eye.fill")
+                                .foregroundColor(t.subtext)
+                        }
                     }
                     .cardStyle(t)
 
@@ -669,7 +759,12 @@ struct SettingsView: View {
             }
         }
         .sheet(item: $picking) { kind in
-            DocumentPicker { url in
+            DocumentPicker(kind: kind) { url in
+                picking = nil
+                guard kind.accepts(url) else {
+                    errorText = "Нужен файл с расширением .\(kind.ext)"
+                    return
+                }
                 do {
                     try store.importFile(url, kind: kind)
                     errorText = nil
@@ -677,7 +772,6 @@ struct SettingsView: View {
                 } catch {
                     errorText = error.localizedDescription
                 }
-                picking = nil
             }
         }
     }
