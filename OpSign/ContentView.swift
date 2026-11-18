@@ -292,7 +292,6 @@ final class AppStore: ObservableObject {
             return (false, "Введи пароль от .p12 в поле выше.")
         }
 
-        // 1. Системная проверка iOS (старые форматы)
         var items: CFArray?
         let options = [kSecImportExportPassphrase as String: pass] as CFDictionary
         let status = SecPKCS12Import(data as CFData, options, &items)
@@ -307,37 +306,29 @@ final class AppStore: ObservableObject {
             return (true, "Пароль верный: \(name)")
         }
 
-        // 2. Если iOS не справилась, проверяем через OpenSSL (новые форматы)
         return opensslCheck(data, pass)
     }
 
     func profileInfo() -> (name: String, expires: Date)? {
-        guard let data = try? Data(contentsOf: profileURL),
-              let s = String(data: data, encoding: .isoLatin1),
-              let a = s.range(of: "<?xml"),
-              let b = s.range(of: "</plist>") else { return nil }
-        let xml = String(s[a.lowerBound..<b.upperBound])
-        guard let d = xml.data(using: .isoLatin1),
-              let obj = try? PropertyListSerialization.propertyList(from: d, options: [], format: nil) as? [String: Any]
-        else { return nil }
-        let name = obj["Name"] as? String ?? "Профиль"
-        let exp = obj["ExpirationDate"] as? Date ?? Date.distantPast
-        return (name, exp)
+        guard let p = try? Signer.readProfile(profileURL) else { return nil }
+        return (p.name, p.expires)
     }
 
-    func createSigned(from ipa: URL) throws -> SignedItem {
+    func newOutput(for ipa: URL) throws -> (url: URL, name: String) {
         let fm = FileManager.default
         try fm.createDirectory(at: signedDir, withIntermediateDirectories: true)
         let base = ipa.deletingPathExtension().lastPathComponent
         let name = "\(base)_OpSign.ipa"
         let fileName = "\(UUID().uuidString.prefix(6))_\(name)"
-        let dest = signedDir.appendingPathComponent(fileName)
-        try fm.copyItem(at: ipa, to: dest)
-        let attrs = try? fm.attributesOfItem(atPath: dest.path)
+        return (signedDir.appendingPathComponent(fileName), name)
+    }
+
+    func registerSigned(url: URL, name: String) {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
-        let item = SignedItem(name: name, fileName: fileName, date: Date(), size: size, isSigned: false)
+        let item = SignedItem(name: name, fileName: url.lastPathComponent,
+                              date: Date(), size: size, isSigned: true)
         signed.insert(item, at: 0)
-        return item
     }
 
     func delete(_ item: SignedItem) {
@@ -515,26 +506,41 @@ struct SignView: View {
         guard let ipa = ipaURL else { return }
         errorText = nil
         working = true
-        progress = 0.1
-        stepText = "Проверка сертификата…"
-        Task { @MainActor in
+        progress = 0.02
+        stepText = "Старт…"
+
+        let p12 = store.p12URL
+        let profile = store.profileURL
+        let pass = store.password.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let output: (url: URL, name: String)
+        do {
+            output = try store.newOutput(for: ipa)
+        } catch {
+            errorText = error.localizedDescription
+            working = false
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try await Task.sleep(nanoseconds: 300_000_000)
-                let check = store.checkCertificate()
-                guard check.ok else { throw AppError(message: check.message) }
-                progress = 0.45
-                stepText = "Подготовка файла…"
-                try await Task.sleep(nanoseconds: 300_000_000)
-                _ = try store.createSigned(from: ipa)
-                progress = 1
-                stepText = "Готово"
-                try await Task.sleep(nanoseconds: 400_000_000)
-                ipaURL = nil
-                working = false
-                tab = 1
+                try Signer.sign(ipa: ipa, p12: p12, password: pass, profile: profile, outURL: output.url) { text, p in
+                    DispatchQueue.main.async {
+                        stepText = text
+                        progress = p
+                    }
+                }
+                DispatchQueue.main.async {
+                    store.registerSigned(url: output.url, name: output.name)
+                    ipaURL = nil
+                    working = false
+                    tab = 1
+                }
             } catch {
-                errorText = error.localizedDescription
-                working = false
+                DispatchQueue.main.async {
+                    errorText = error.localizedDescription
+                    working = false
+                }
             }
         }
     }
@@ -593,7 +599,7 @@ struct SignedView: View {
                     Text("\(ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file)) · \(item.date.formatted(date: .abbreviated, time: .shortened))")
                         .font(.caption)
                         .foregroundColor(t.subtext)
-                    Text(item.isSigned ? "Подписан" : "Не подписан (подпись на следующем этапе)")
+                    Text(item.isSigned ? "Подписан" : "Не подписан (старая версия)")
                         .font(.caption)
                         .foregroundColor(item.isSigned ? .green : .orange)
                 }
