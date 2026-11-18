@@ -217,11 +217,19 @@ final class AppStore: ObservableObject {
         guard let data = try? Data(contentsOf: p12URL) else {
             return (false, "Файл .p12 не найден. Добавь его в Настройках.")
         }
+        if data.count < 200 {
+            return (false, "Файл .p12 слишком маленький (\(data.count) байт). Скорее всего, выбран не тот файл.")
+        }
+        let pass = password.trimmingCharacters(in: .whitespacesAndNewlines)
         var items: CFArray?
-        let options = [kSecImportExportPassphrase as String: password] as CFDictionary
+        let options = [kSecImportExportPassphrase as String: pass] as CFDictionary
         let status = SecPKCS12Import(data as CFData, options, &items)
-        if status == errSecAuthFailed || status == errSecDecode {
-            return (false, "Неверный пароль или повреждённый .p12")
+
+        if status == errSecAuthFailed {
+            return (false, "Неверный пароль (код \(status)). Введи пароль заново вручную.")
+        }
+        if status == errSecDecode {
+            return (false, "iOS не смогла прочитать .p12 (код \(status), размер \(data.count) байт). Либо файл повреждён, либо он в новом формате шифрования, который системная проверка не понимает. Для подписи через zsign такой файл может подойти.")
         }
         guard status == errSecSuccess,
               let arr = items as? [[String: Any]],
