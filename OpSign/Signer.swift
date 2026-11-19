@@ -188,11 +188,11 @@ enum Signer {
 
                         rc = zsign_sign(
                             appURL.path,
-                            certBuf.baseAddress, certBuf.count,
-                            keyBuf.baseAddress, keyBuf.count,
+                            certBuf.baseAddress!, certBuf.count,
+                            keyBuf.baseAddress!, keyBuf.count,
                             entPtr, 1,
                             { _, _ in },
-                            nil,
+                            UnsafeRawPointer(entPtr),
                             &exception
                         )
                     }
