@@ -5,19 +5,27 @@ import Security
 import OpenSSL
 #endif
 
+// MARK: - Язык
+
+enum AppLanguage: String, CaseIterable, Identifiable {
+    case ru, en
+    var id: String { rawValue }
+    var title: String { self == .ru ? "Русский" : "English" }
+}
+
 // MARK: - Темы
 
 enum AppTheme: String, CaseIterable, Identifiable {
     case dark, light, purple, ocean, sunset
     var id: String { rawValue }
 
-    var title: String {
+    func title(_ lang: AppLanguage) -> String {
         switch self {
-        case .dark: return "Чёрная"
-        case .light: return "Белая"
-        case .purple: return "Фиолетовая"
-        case .ocean: return "Океан"
-        case .sunset: return "Закат"
+        case .dark: return lang == .ru ? "Чёрная" : "Black"
+        case .light: return lang == .ru ? "Белая" : "White"
+        case .purple: return lang == .ru ? "Фиолетовая" : "Purple"
+        case .ocean: return lang == .ru ? "Океан" : "Ocean"
+        case .sunset: return lang == .ru ? "Закат" : "Sunset"
         }
     }
 
@@ -152,34 +160,40 @@ struct DocumentPicker: UIViewControllerRepresentable {
 
 // MARK: - Проверка .p12 через OpenSSL
 
-func opensslCheck(_ data: Data, _ pass: String) -> (ok: Bool, message: String) {
+func opensslCheck(_ data: Data, _ pass: String, _ lang: AppLanguage) -> (ok: Bool, message: String) {
     #if canImport(OpenSSL)
-    var out: (ok: Bool, message: String) = (false, "Неизвестная ошибка")
+    var out: (ok: Bool, message: String) = (false, "Unknown error")
     data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
         guard let base = raw.bindMemory(to: UInt8.self).baseAddress else {
-            out = (false, "Файл пустой")
+            out = (false, Signer.tr(lang, "Файл пустой", "The file is empty"))
             return
         }
         var ptr: UnsafePointer<UInt8>? = base
         guard let p12 = d2i_PKCS12(nil, &ptr, data.count) else {
-            out = (false, "Структура файла не похожа на .p12. Скорее всего, выбран не тот файл или он повреждён.")
+            out = (false, Signer.tr(lang,
+                                    "Структура файла не похожа на .p12. Скорее всего, выбран не тот файл или он повреждён.",
+                                    "The file structure does not look like a .p12. Most likely the wrong file or it is damaged."))
             return
         }
         defer { PKCS12_free(p12) }
 
         if PKCS12_verify_mac(p12, pass, -1) != 1 {
-            out = (false, "Неверный пароль от .p12. Проверь пароль (нажми на глазок рядом с полем).")
+            out = (false, Signer.tr(lang,
+                                    "Неверный пароль от .p12. Проверь пароль (нажми на глазок рядом с полем).",
+                                    "Wrong .p12 password. Check it (tap the eye icon next to the field)."))
             return
         }
 
         var pkey: OpaquePointer?
         var cert: OpaquePointer?
         if PKCS12_parse(p12, pass, &pkey, &cert, nil) != 1 {
-            out = (false, "Пароль верный, но файл использует устаревший алгоритм шифрования. Выпусти или пересохрани .p12 заново.")
+            out = (false, Signer.tr(lang,
+                                    "Пароль верный, но файл использует устаревший алгоритм шифрования. Выпусти или пересохрани .p12 заново.",
+                                    "The password is correct, but the file uses an outdated encryption algorithm. Re-export the .p12."))
             return
         }
 
-        var name = "сертификат"
+        var name = Signer.tr(lang, "сертификат", "certificate")
         if let c = cert, let subj = X509_get_subject_name(c) {
             var buf = [CChar](repeating: 0, count: 256)
             if X509_NAME_get_text_by_NID(subj, NID_commonName, &buf, 256) > 0 {
@@ -188,11 +202,11 @@ func opensslCheck(_ data: Data, _ pass: String) -> (ok: Bool, message: String) {
         }
         if let c = cert { X509_free(c) }
         if let k = pkey { EVP_PKEY_free(k) }
-        out = (true, "Пароль верный: \(name)")
+        out = (true, Signer.tr(lang, "Пароль верный: \(name)", "Password is correct: \(name)"))
     }
     return out
     #else
-    return (false, "OpenSSL не подключён в сборке.")
+    return (false, "OpenSSL is not included in this build.")
     #endif
 }
 
@@ -216,6 +230,9 @@ final class AppStore: ObservableObject {
     @Published var theme: AppTheme {
         didSet { UserDefaults.standard.set(theme.rawValue, forKey: "theme") }
     }
+    @Published var lang: AppLanguage {
+        didSet { UserDefaults.standard.set(lang.rawValue, forKey: "lang") }
+    }
     @Published var p12Name: String? {
         didSet { UserDefaults.standard.set(p12Name, forKey: "p12Name") }
     }
@@ -232,6 +249,12 @@ final class AppStore: ObservableObject {
     init() {
         let d = UserDefaults.standard
         theme = AppTheme(rawValue: d.string(forKey: "theme") ?? "") ?? .purple
+        if let saved = AppLanguage(rawValue: d.string(forKey: "lang") ?? "") {
+            lang = saved
+        } else {
+            let sys = Locale.preferredLanguages.first ?? "en"
+            lang = sys.hasPrefix("ru") ? .ru : .en
+        }
         p12Name = d.string(forKey: "p12Name")
         profileName = d.string(forKey: "profileName")
         password = d.string(forKey: "p12Password") ?? ""
@@ -239,6 +262,10 @@ final class AppStore: ObservableObject {
            let items = try? JSONDecoder().decode([SignedItem].self, from: data) {
             signed = items
         }
+    }
+
+    func tr(_ ru: String, _ en: String) -> String {
+        lang == .ru ? ru : en
     }
 
     private var supportDir: URL {
@@ -282,14 +309,16 @@ final class AppStore: ObservableObject {
 
     func checkCertificate() -> (ok: Bool, message: String) {
         guard let data = try? Data(contentsOf: p12URL) else {
-            return (false, "Файл .p12 не найден. Добавь его в Настройках.")
+            return (false, tr("Файл .p12 не найден. Добавь его в Настройках.",
+                              "The .p12 file was not found. Add it in Settings."))
         }
         if data.count < 200 {
-            return (false, "Файл .p12 слишком маленький (\(data.count) байт). Скорее всего, выбран не тот файл.")
+            return (false, tr("Файл .p12 слишком маленький (\(data.count) байт). Скорее всего, выбран не тот файл.",
+                              "The .p12 file is too small (\(data.count) bytes). Most likely the wrong file."))
         }
         let pass = password.trimmingCharacters(in: .whitespacesAndNewlines)
         if pass.isEmpty {
-            return (false, "Введи пароль от .p12 в поле выше.")
+            return (false, tr("Введи пароль от .p12 в поле выше.", "Enter the .p12 password in the field above."))
         }
 
         var items: CFArray?
@@ -302,15 +331,15 @@ final class AppStore: ObservableObject {
             let identity = identityAny as! SecIdentity
             var cert: SecCertificate?
             SecIdentityCopyCertificate(identity, &cert)
-            let name = cert.flatMap { SecCertificateCopySubjectSummary($0) as String? } ?? "сертификат"
-            return (true, "Пароль верный: \(name)")
+            let name = cert.flatMap { SecCertificateCopySubjectSummary($0) as String? } ?? tr("сертификат", "certificate")
+            return (true, tr("Пароль верный: \(name)", "Password is correct: \(name)"))
         }
 
-        return opensslCheck(data, pass)
+        return opensslCheck(data, pass, lang)
     }
 
     func profileInfo() -> (name: String, expires: Date)? {
-        guard let p = try? Signer.readProfile(profileURL) else { return nil }
+        guard let p = try? Signer.readProfile(profileURL, lang: lang) else { return nil }
         return (p.name, p.expires)
     }
 
@@ -352,13 +381,13 @@ struct ContentView: View {
     var body: some View {
         TabView(selection: $tab) {
             SignView(tab: $tab)
-                .tabItem { Label("Подпись", systemImage: "checkmark.seal.fill") }
+                .tabItem { Label(store.tr("Подпись", "Sign"), systemImage: "checkmark.seal.fill") }
                 .tag(0)
             SignedView()
-                .tabItem { Label("Подписанные", systemImage: "tray.full.fill") }
+                .tabItem { Label(store.tr("Подписанные", "Signed"), systemImage: "tray.full.fill") }
                 .tag(1)
             SettingsView()
-                .tabItem { Label("Настройки", systemImage: "gearshape.fill") }
+                .tabItem { Label(store.tr("Настройки", "Settings"), systemImage: "gearshape.fill") }
                 .tag(2)
         }
         .tint(store.theme.accent)
@@ -389,13 +418,15 @@ struct SignView: View {
                         .font(.system(size: 38, weight: .bold, design: .rounded))
                         .foregroundColor(t.text)
                         .padding(.top, 24)
-                    Text("Подпись приложений")
+                    Text(store.tr("Подпись приложений", "App signing"))
                         .font(.subheadline)
                         .foregroundColor(t.subtext)
                         .padding(.bottom, 8)
 
-                    FileCard(theme: t, title: "IPA файл", icon: "shippingbox.fill",
-                             subtitle: ipaURL?.lastPathComponent ?? "Не выбран",
+                    FileCard(theme: t,
+                             title: store.tr("IPA файл", "IPA file"),
+                             icon: "shippingbox.fill",
+                             subtitle: ipaURL?.lastPathComponent ?? store.tr("Не выбран", "Not selected"),
                              done: ipaURL != nil) {
                         showPicker = true
                     }
@@ -422,7 +453,7 @@ struct SignView: View {
                     }
 
                     Button(action: startSign) {
-                        Text(working ? "Подождите…" : "Подписать")
+                        Text(working ? store.tr("Подождите…", "Please wait…") : store.tr("Подписать", "Sign"))
                             .font(.headline)
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
@@ -431,7 +462,7 @@ struct SignView: View {
                                 LinearGradient(colors: [t.accent, t.accent.opacity(0.65)],
                                                startPoint: .leading, endPoint: .trailing)
                             )
-                            .clipShape(RoundedRectangle(cornerRadius: 18))
+                            .clipShape(RoundRectangle(cornerRadius: 18))
                             .opacity(isReady ? 1 : 0.4)
                     }
                     .disabled(!isReady || working)
@@ -447,7 +478,7 @@ struct SignView: View {
                     ipaURL = url
                     errorText = nil
                 } else {
-                    errorText = "Нужен файл с расширением .ipa"
+                    errorText = store.tr("Нужен файл с расширением .ipa", "A file with the .ipa extension is required")
                 }
             }
         }
@@ -464,7 +495,7 @@ struct SignView: View {
                     .foregroundColor(t.accent)
                     .frame(width: 32)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Сертификат")
+                    Text(store.tr("Сертификат", "Certificate"))
                         .font(.headline)
                         .foregroundColor(t.text)
                     Text(store.p12Name ?? "")
@@ -486,10 +517,10 @@ struct SignView: View {
                         .foregroundColor(.orange)
                         .frame(width: 32)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Нет сертификата")
+                        Text(store.tr("Нет сертификата", "No certificate"))
                             .font(.headline)
                             .foregroundColor(t.text)
-                        Text("Нажми, чтобы добавить в Настройках")
+                        Text(store.tr("Нажми, чтобы добавить в Настройках", "Tap to add it in Settings"))
                             .font(.caption)
                             .foregroundColor(t.subtext)
                     }
@@ -507,11 +538,12 @@ struct SignView: View {
         errorText = nil
         working = true
         progress = 0.02
-        stepText = "Старт…"
+        stepText = store.tr("Старт…", "Starting…")
 
         let p12 = store.p12URL
         let profile = store.profileURL
         let pass = store.password.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lang = store.lang
 
         let output: (url: URL, name: String)
         do {
@@ -524,7 +556,8 @@ struct SignView: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try Signer.sign(ipa: ipa, p12: p12, password: pass, profile: profile, outURL: output.url) { text, p in
+                try Signer.sign(ipa: ipa, p12: p12, password: pass, profile: profile,
+                                outURL: output.url, lang: lang) { text, p in
                     DispatchQueue.main.async {
                         stepText = text
                         progress = p
@@ -557,7 +590,7 @@ struct SignedView: View {
             ThemedBackground()
             ScrollView {
                 VStack(spacing: 14) {
-                    Text("Подписанные")
+                    Text(store.tr("Подписанные", "Signed"))
                         .font(.system(size: 32, weight: .bold, design: .rounded))
                         .foregroundColor(t.text)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -568,7 +601,7 @@ struct SignedView: View {
                             Image(systemName: "tray")
                                 .font(.system(size: 44))
                                 .foregroundColor(t.subtext)
-                            Text("Пока пусто")
+                            Text(store.tr("Пока пусто", "Nothing here yet"))
                                 .foregroundColor(t.subtext)
                         }
                         .frame(maxWidth: .infinity)
@@ -599,7 +632,7 @@ struct SignedView: View {
                     Text("\(ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file)) · \(item.date.formatted(date: .abbreviated, time: .shortened))")
                         .font(.caption)
                         .foregroundColor(t.subtext)
-                    Text(item.isSigned ? "Подписан" : "Не подписан (старая версия)")
+                    Text(item.isSigned ? store.tr("Подписан", "Signed") : store.tr("Не подписан (старая версия)", "Not signed (old version)"))
                         .font(.caption)
                         .foregroundColor(item.isSigned ? .green : .orange)
                 }
@@ -607,7 +640,7 @@ struct SignedView: View {
             }
             HStack(spacing: 12) {
                 ShareLink(item: store.url(for: item)) {
-                    Label("Сохранить / Поделиться", systemImage: "square.and.arrow.up")
+                    Label(store.tr("Сохранить / Поделиться", "Save / Share"), systemImage: "square.and.arrow.up")
                         .font(.subheadline.weight(.semibold))
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
@@ -647,21 +680,25 @@ struct SettingsView: View {
             ThemedBackground()
             ScrollView {
                 VStack(spacing: 16) {
-                    Text("Настройки")
+                    Text(store.tr("Настройки", "Settings"))
                         .font(.system(size: 32, weight: .bold, design: .rounded))
                         .foregroundColor(t.text)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 24)
 
-                    sectionTitle("Сертификат")
+                    sectionTitle(store.tr("Сертификат", "Certificate"))
 
-                    FileCard(theme: t, title: "Сертификат .p12", icon: "key.fill",
-                             subtitle: store.p12Name ?? "Не выбран (только .p12)",
+                    FileCard(theme: t,
+                             title: store.tr("Сертификат .p12", "Certificate .p12"),
+                             icon: "key.fill",
+                             subtitle: store.p12Name ?? store.tr("Не выбран (только .p12)", "Not selected (.p12 only)"),
                              done: store.p12Name != nil) {
                         picking = .p12
                     }
-                    FileCard(theme: t, title: "Профиль .mobileprovision", icon: "doc.badge.gearshape.fill",
-                             subtitle: store.profileName ?? "Не выбран (только .mobileprovision)",
+                    FileCard(theme: t,
+                             title: store.tr("Профиль .mobileprovision", "Profile .mobileprovision"),
+                             icon: "doc.badge.gearshape.fill",
+                             subtitle: store.profileName ?? store.tr("Не выбран (только .mobileprovision)", "Not selected (.mobileprovision only)"),
                              done: store.profileName != nil) {
                         picking = .profile
                     }
@@ -674,10 +711,10 @@ struct SettingsView: View {
                         Group {
                             if showPassword {
                                 TextField(text: $store.password,
-                                          prompt: Text("Пароль от .p12").foregroundColor(t.subtext)) { EmptyView() }
+                                          prompt: Text(store.tr("Пароль от .p12", ".p12 password")).foregroundColor(t.subtext)) { EmptyView() }
                             } else {
                                 SecureField(text: $store.password,
-                                            prompt: Text("Пароль от .p12").foregroundColor(t.subtext)) { EmptyView() }
+                                            prompt: Text(store.tr("Пароль от .p12", ".p12 password")).foregroundColor(t.subtext)) { EmptyView() }
                             }
                         }
                         .foregroundColor(t.text)
@@ -698,7 +735,7 @@ struct SettingsView: View {
                         HStack {
                             Image(systemName: expired ? "xmark.octagon.fill" : "calendar")
                                 .foregroundColor(expired ? .red : t.accent)
-                            Text("\(info.name): \(expired ? "истёк" : "до") \(info.expires.formatted(date: .abbreviated, time: .omitted))")
+                            Text("\(info.name): \(expired ? store.tr("истёк", "expired") : store.tr("до", "until")) \(info.expires.formatted(date: .abbreviated, time: .omitted))")
                                 .font(.subheadline)
                                 .foregroundColor(expired ? .red : t.text)
                             Spacer()
@@ -727,7 +764,7 @@ struct SettingsView: View {
                             checkOK = r.ok
                             checkMessage = r.message
                         } label: {
-                            Text("Проверить")
+                            Text(store.tr("Проверить", "Check"))
                                 .font(.headline)
                                 .foregroundColor(.white)
                                 .frame(maxWidth: .infinity)
@@ -739,7 +776,7 @@ struct SettingsView: View {
                             store.resetCert()
                             checkMessage = nil
                         } label: {
-                            Text("Удалить")
+                            Text(store.tr("Удалить", "Delete"))
                                 .font(.headline)
                                 .foregroundColor(.red)
                                 .padding()
@@ -748,7 +785,15 @@ struct SettingsView: View {
                         }
                     }
 
-                    sectionTitle("Тема")
+                    sectionTitle(store.tr("Язык", "Language"))
+
+                    HStack(spacing: 12) {
+                        ForEach(AppLanguage.allCases) { l in
+                            languageTile(l)
+                        }
+                    }
+
+                    sectionTitle(store.tr("Тема", "Theme"))
 
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 12)], spacing: 12) {
                         ForEach(AppTheme.allCases) { theme in
@@ -768,7 +813,7 @@ struct SettingsView: View {
             DocumentPicker(kind: kind) { url in
                 picking = nil
                 guard kind.accepts(url) else {
-                    errorText = "Нужен файл с расширением .\(kind.ext)"
+                    errorText = store.tr("Нужен файл с расширением .\(kind.ext)", "A file with the .\(kind.ext) extension is required")
                     return
                 }
                 do {
@@ -790,6 +835,24 @@ struct SettingsView: View {
             .padding(.top, 8)
     }
 
+    func languageTile(_ l: AppLanguage) -> some View {
+        Button {
+            store.lang = l
+        } label: {
+            HStack(spacing: 8) {
+                Text(l.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(t.text)
+                if store.lang == l {
+                    Image(systemName: "checkmark.circle.fill").foregroundColor(t.accent)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .cardStyle(t)
+        }
+        .buttonStyle(.plain)
+    }
+
     func themeTile(_ theme: AppTheme) -> some View {
         Button {
             store.theme = theme
@@ -806,7 +869,7 @@ struct SettingsView: View {
                             .stroke(Color.gray.opacity(0.4), lineWidth: 1)
                     )
                 HStack(spacing: 6) {
-                    Text(theme.title)
+                    Text(theme.title(store.lang))
                         .font(.subheadline.weight(.semibold))
                         .foregroundColor(t.text)
                     if store.theme == theme {
