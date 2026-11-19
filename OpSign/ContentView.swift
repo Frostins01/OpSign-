@@ -462,7 +462,7 @@ struct SignView: View {
                                 LinearGradient(colors: [t.accent, t.accent.opacity(0.65)],
                                                startPoint: .leading, endPoint: .trailing)
                             )
-                            .clipShape(RoundRectangle(cornerRadius: 18))
+                            .clipShape(RoundRectangled(cornerRadius: 18))
                             .opacity(isReady ? 1 : 0.4)
                     }
                     .disabled(!isReady || working)
