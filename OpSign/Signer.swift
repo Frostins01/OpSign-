@@ -178,18 +178,24 @@ enum Signer {
         identity.certDER.withUnsafeBytes { certBuf in
             identity.keyPEM.withUnsafeBytes { keyBuf in
                 entData.withUnsafeBytes { entBuf in
-                    var ent = entitlements_data_t()
-                    ent.data = entBuf.baseAddress
-                    ent.len = entBuf.count
-                    rc = zsign_sign(
-                        appURL.path,
-                        certBuf.baseAddress, certBuf.count,
-                        keyBuf.baseAddress, keyBuf.count,
-                        &ent, 1,
-                        { _, _ in },
-                        nil,
-                        &exception
-                    )
+                    "".withCString { rootPath in
+                        let entPtr = UnsafeMutablePointer<entitlements_data_t>.allocate(capacity: 1)
+                        defer { entPtr.deallocate() }
+                        memset(entPtr, 0, MemoryLayout<entitlements_data_t>.stride)
+                        entPtr.pointee.data = entBuf.baseAddress!
+                        entPtr.pointee.len = entBuf.count
+                        entPtr.pointee.bundle_path = rootPath
+
+                        rc = zsign_sign(
+                            appURL.path,
+                            certBuf.baseAddress, certBuf.count,
+                            keyBuf.baseAddress, keyBuf.count,
+                            entPtr, 1,
+                            { _, _ in },
+                            nil,
+                            &exception
+                        )
+                    }
                 }
             }
         }
