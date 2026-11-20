@@ -12,6 +12,12 @@ struct ProfileData {
     let certs: [Data]
 }
 
+struct SignedInfo {
+    let bundleID: String
+    let name: String
+    let version: String
+}
+
 enum Signer {
 
     static func tr(_ lang: AppLanguage, _ ru: String, _ en: String) -> String {
@@ -117,7 +123,7 @@ enum Signer {
                      profile: URL,
                      outURL: URL,
                      lang: AppLanguage,
-                     report: @escaping (String, Double) -> Void) throws {
+                     report: @escaping (String, Double) -> Void) throws -> SignedInfo {
         let fm = FileManager.default
         let work = fm.temporaryDirectory.appendingPathComponent("opsign_" + UUID().uuidString)
         try fm.createDirectory(at: work, withIntermediateDirectories: true)
@@ -185,6 +191,14 @@ enum Signer {
             try info.write(to: infoURL)
         }
 
+        // Данные приложения для установки
+        let displayName = (info["CFBundleDisplayName"] as? String)
+            ?? (info["CFBundleName"] as? String)
+            ?? appName.replacingOccurrences(of: ".app", with: "")
+        let appVersion = (info["CFBundleShortVersionString"] as? String)
+            ?? (info["CFBundleVersion"] as? String)
+            ?? "1.0"
+
         // Расширения и часы подписать одним профилем нельзя, убираем их
         for folder in ["PlugIns", "Watch"] {
             let path = appURL.appendingPathComponent(folder)
@@ -242,5 +256,7 @@ enum Signer {
         if fm.fileExists(atPath: outURL.path) { try fm.removeItem(at: outURL) }
         try fm.zipItem(at: payload, to: outURL, shouldKeepParent: true)
         report(tr(lang, "Готово", "Done"), 1.0)
+
+        return SignedInfo(bundleID: finalBundleID, name: displayName, version: appVersion)
     }
 }
