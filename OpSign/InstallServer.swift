@@ -1,6 +1,6 @@
 import Foundation
 import Network
-import SafariServices
+import WebKit
 import UIKit
 
 /// Маленький локальный сервер: отдаёт подписанный IPA и страницу, которая запускает установку.
@@ -11,6 +11,9 @@ final class InstallServer {
     private var ipaPath = "/app.ipa"
     private var pageHTML = ""
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
+
+    // Невидимый браузер, который запускает установку
+    private static var hiddenWebView: WKWebView?
 
     // MARK: Запуск
 
@@ -87,7 +90,7 @@ final class InstallServer {
         }
     }
 
-    // MARK: Страница с запуском установки
+    // MARK: Страница, которая сразу запускает установку
 
     private func makeHTML(itms: String) -> String {
         let attr = itms.replacingOccurrences(of: "&", with: "&amp;")
@@ -98,19 +101,11 @@ final class InstallServer {
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>OpSign</title>
-        <style>
-        body { font-family: -apple-system, sans-serif; background: #0d0d26; color: #fff; text-align: center; padding-top: 28vh; }
-        h2 { font-size: 34px; margin-bottom: 8px; }
-        p { color: #aaa; }
-        a { display: inline-block; margin-top: 24px; padding: 16px 40px; border-radius: 18px; background: #a259ff; color: #fff; text-decoration: none; font-weight: 600; font-size: 18px; }
-        </style>
         </head>
         <body>
-        <h2>OpSign</h2>
-        <p>Starting installation…</p>
-        <a href="\(attr)">Install</a>
+        <a id="go" href="\(attr)">Install</a>
         <script>
-        setTimeout(function () { window.location.href = "\(itms)"; }, 400);
+        window.location.href = "\(itms)";
         </script>
         </body>
         </html>
@@ -240,14 +235,20 @@ final class InstallServer {
         })
     }
 
-    // MARK: Окно Safari
+    // MARK: Невидимый браузер (название оставлено прежним, чтобы не менять другие файлы)
 
     static func presentSafari(_ url: URL) {
         guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
-              let window = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first,
-              var top = window.rootViewController else { return }
-        while let presented = top.presentedViewController { top = presented }
-        let vc = SFSafariViewController(url: url)
-        top.present(vc, animated: true)
+              let window = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first else { return }
+
+        hiddenWebView?.removeFromSuperview()
+
+        let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: 2, height: 2),
+                           configuration: WKWebViewConfiguration())
+        wv.alpha = 0.01
+        wv.isUserInteractionEnabled = false
+        window.addSubview(wv)
+        wv.load(URLRequest(url: url))
+        hiddenWebView = wv
     }
 }
