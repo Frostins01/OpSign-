@@ -13,100 +13,6 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     var title: String { self == .ru ? "Русский" : "English" }
 }
 
-// MARK: - Темы
-
-enum AppTheme: String, CaseIterable, Identifiable {
-    case dark, light, purple, ocean, sunset
-    var id: String { rawValue }
-
-    func title(_ lang: AppLanguage) -> String {
-        switch self {
-        case .dark: return lang == .ru ? "Чёрная" : "Black"
-        case .light: return lang == .ru ? "Белая" : "White"
-        case .purple: return lang == .ru ? "Фиолетовая" : "Purple"
-        case .ocean: return lang == .ru ? "Океан" : "Ocean"
-        case .sunset: return lang == .ru ? "Закат" : "Sunset"
-        }
-    }
-
-    var colors: [Color] {
-        switch self {
-        case .dark: return [Color(red: 0.03, green: 0.03, blue: 0.04), Color(red: 0.10, green: 0.10, blue: 0.12)]
-        case .light: return [Color(red: 0.97, green: 0.97, blue: 1.0), Color(red: 0.86, green: 0.89, blue: 1.0)]
-        case .purple: return [Color(red: 0.05, green: 0.05, blue: 0.15), Color(red: 0.18, green: 0.06, blue: 0.35)]
-        case .ocean: return [Color(red: 0.02, green: 0.08, blue: 0.18), Color(red: 0.0, green: 0.30, blue: 0.40)]
-        case .sunset: return [Color(red: 0.18, green: 0.04, blue: 0.16), Color(red: 0.55, green: 0.17, blue: 0.20)]
-        }
-    }
-
-    var accent: Color {
-        switch self {
-        case .dark: return Color(red: 0.40, green: 0.60, blue: 1.0)
-        case .light: return Color(red: 0.35, green: 0.30, blue: 0.90)
-        case .purple: return Color(red: 0.70, green: 0.35, blue: 1.0)
-        case .ocean: return Color(red: 0.20, green: 0.85, blue: 0.90)
-        case .sunset: return Color(red: 1.0, green: 0.60, blue: 0.25)
-        }
-    }
-
-    var isLight: Bool { self == .light }
-    var scheme: ColorScheme { isLight ? .light : .dark }
-    var text: Color { isLight ? Color(white: 0.1) : .white }
-    var subtext: Color { text.opacity(0.55) }
-    var card: Color { isLight ? .white : Color.white.opacity(0.09) }
-}
-
-struct ThemedBackground: View {
-    @EnvironmentObject var store: AppStore
-    var body: some View {
-        LinearGradient(colors: store.theme.colors, startPoint: .topLeading, endPoint: .bottomTrailing)
-            .ignoresSafeArea()
-    }
-}
-
-extension View {
-    func cardStyle(_ t: AppTheme) -> some View {
-        self.padding()
-            .background(t.card)
-            .clipShape(RoundedRectangle(cornerRadius: 18))
-            .shadow(color: .black.opacity(t.isLight ? 0.08 : 0), radius: 8, x: 0, y: 2)
-    }
-}
-
-struct FileCard: View {
-    let theme: AppTheme
-    let title: String
-    let icon: String
-    let subtitle: String
-    let done: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 14) {
-                Image(systemName: icon)
-                    .font(.title2)
-                    .foregroundColor(theme.accent)
-                    .frame(width: 32)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.headline)
-                        .foregroundColor(theme.text)
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundColor(done ? .green : theme.subtext)
-                        .lineLimit(1)
-                }
-                Spacer()
-                Image(systemName: done ? "checkmark.circle.fill" : "plus.circle")
-                    .foregroundColor(done ? .green : theme.subtext)
-            }
-            .cardStyle(theme)
-        }
-        .buttonStyle(.plain)
-    }
-}
-
 // MARK: - Выбор файлов
 
 enum PickKind: Int, Identifiable {
@@ -230,9 +136,21 @@ struct AppError: LocalizedError {
 }
 
 final class AppStore: ObservableObject {
-    @Published var theme: AppTheme {
-        didSet { UserDefaults.standard.set(theme.rawValue, forKey: "theme") }
+    // Цвет интерфейса
+    @Published var bgChoice: String {
+        didSet { UserDefaults.standard.set(bgChoice, forKey: "bgChoice") }
     }
+    @Published var bgHex1: String {
+        didSet { UserDefaults.standard.set(bgHex1, forKey: "bgHex1") }
+    }
+    @Published var bgHex2: String {
+        didSet { UserDefaults.standard.set(bgHex2, forKey: "bgHex2") }
+    }
+    // Цвет кнопок
+    @Published var accentHex: String {
+        didSet { UserDefaults.standard.set(accentHex, forKey: "accentHex") }
+    }
+
     @Published var lang: AppLanguage {
         didSet { UserDefaults.standard.set(lang.rawValue, forKey: "lang") }
     }
@@ -253,7 +171,13 @@ final class AppStore: ObservableObject {
 
     init() {
         let d = UserDefaults.standard
-        theme = AppTheme(rawValue: d.string(forKey: "theme") ?? "") ?? .purple
+
+        let savedChoice = d.string(forKey: "bgChoice") ?? d.string(forKey: "theme") ?? "purple"
+        bgChoice = (savedChoice == "custom" || AppTheme(rawValue: savedChoice) != nil) ? savedChoice : "purple"
+        bgHex1 = d.string(forKey: "bgHex1") ?? "0D0D26"
+        bgHex2 = d.string(forKey: "bgHex2") ?? "2E0F59"
+        accentHex = d.string(forKey: "accentHex") ?? "B359FF"
+
         if let saved = AppLanguage(rawValue: d.string(forKey: "lang") ?? "") {
             lang = saved
         } else {
@@ -268,6 +192,27 @@ final class AppStore: ObservableObject {
             signed = items
         }
     }
+
+    // Палитра приложения
+    var palette: Palette {
+        var colors: [Color]
+        var light = false
+        if bgChoice == "custom" {
+            let c1 = Color(hex: bgHex1)
+            let c2 = Color(hex: bgHex2)
+            colors = [c1, c2]
+            light = (c1.luminance + c2.luminance) / 2 > 0.6
+        } else if let preset = AppTheme(rawValue: bgChoice) {
+            colors = preset.colors
+            light = preset.isLight
+        } else {
+            colors = AppTheme.purple.colors
+        }
+        return Palette(colors: colors, accent: Color(hex: accentHex), isLight: light)
+    }
+
+    /// Совместимость со старым кодом (OpSignApp.swift использует theme.scheme)
+    var theme: Palette { palette }
 
     func tr(_ ru: String, _ en: String) -> String {
         lang == .ru ? ru : en
@@ -419,11 +364,14 @@ struct ContentView: View {
             SignedView()
                 .tabItem { Label(store.tr("Подписанные", "Signed"), systemImage: "tray.full.fill") }
                 .tag(1)
+            GamesView()
+                .tabItem { Label(store.tr("Игры", "Games"), systemImage: "gamecontroller.fill") }
+                .tag(2)
             SettingsView()
                 .tabItem { Label(store.tr("Настройки", "Settings"), systemImage: "gearshape.fill") }
-                .tag(2)
+                .tag(3)
         }
-        .tint(store.theme.accent)
+        .tint(store.palette.accent)
     }
 }
 
@@ -441,21 +389,14 @@ struct SignView: View {
     @State private var errorText: String?
     @State private var infoText: String?
 
-    var t: AppTheme { store.theme }
+    var t: Palette { store.palette }
 
     var body: some View {
         ZStack {
             ThemedBackground()
             ScrollView {
-                VStack(spacing: 16) {
-                    Text("OpSign")
-                        .font(.system(size: 38, weight: .bold, design: .rounded))
-                        .foregroundColor(t.text)
-                        .padding(.top, 24)
-                    Text(store.tr("Подпись и установка приложений", "App signing & installing"))
-                        .font(.subheadline)
-                        .foregroundColor(t.subtext)
-                        .padding(.bottom, 8)
+                VStack(spacing: 14) {
+                    header
 
                     FileCard(theme: t,
                              title: store.tr("IPA файл", "IPA file"),
@@ -468,14 +409,15 @@ struct SignView: View {
                     certCard
 
                     if working {
-                        VStack(alignment: .leading, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 12) {
                             Text(stepText)
-                                .font(.subheadline)
+                                .font(.subheadline.weight(.medium))
                                 .foregroundColor(t.text)
                             ProgressView(value: progress)
                                 .tint(t.accent)
                         }
-                        .cardStyle(t)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .glassCard(t)
                     }
 
                     if let infoText {
@@ -483,7 +425,7 @@ struct SignView: View {
                             .font(.subheadline)
                             .foregroundColor(.green)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .cardStyle(t)
+                            .glassCard(t)
                     }
 
                     if let errorText {
@@ -491,39 +433,43 @@ struct SignView: View {
                             .font(.subheadline)
                             .foregroundColor(.red)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .cardStyle(t)
+                            .glassCard(t)
                     }
 
                     Button {
                         startSign(install: true)
                     } label: {
-                        Text(working ? store.tr("Подождите…", "Please wait…") : store.tr("Установить", "Install"))
-                            .font(.headline)
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                            .background(
-                                LinearGradient(colors: [t.accent, t.accent.opacity(0.65)],
-                                               startPoint: .leading, endPoint: .trailing)
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: 18))
-                            .opacity(isReady ? 1 : 0.4)
+                        HStack(spacing: 10) {
+                            Image(systemName: "arrow.down.app.fill")
+                            Text(working ? store.tr("Подождите…", "Please wait…") : store.tr("Установить", "Install"))
+                        }
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 18)
+                        .glassButton(t.accent)
+                        .opacity(isReady ? 1 : 0.45)
                     }
+                    .buttonStyle(.plain)
                     .disabled(!isReady || working)
-                    .padding(.top, 8)
+                    .padding(.top, 6)
 
                     Button {
                         startSign(install: false)
                     } label: {
                         Text(store.tr("Только подписать", "Sign only"))
                             .font(.subheadline.weight(.semibold))
-                            .foregroundColor(t.accent)
-                            .padding(.vertical, 6)
-                            .opacity(isReady ? 1 : 0.4)
+                            .foregroundColor(t.text)
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 12)
+                            .glassButton(nil)
+                            .opacity(isReady ? 1 : 0.45)
                     }
+                    .buttonStyle(.plain)
                     .disabled(!isReady || working)
                 }
-                .padding()
+                .padding(.horizontal, 18)
+                .padding(.bottom, 110)
             }
         }
         .sheet(isPresented: $showPicker) {
@@ -539,6 +485,24 @@ struct SignView: View {
         }
     }
 
+    var header: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "checkmark.shield.fill")
+                .font(.system(size: 34, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 76, height: 76)
+                .glassButton(t.accent, interactive: false)
+            Text("OpSign")
+                .font(.system(size: 36, weight: .bold, design: .rounded))
+                .foregroundColor(t.text)
+            Text(store.tr("Подпись и установка приложений", "App signing & installing"))
+                .font(.subheadline)
+                .foregroundColor(t.subtext)
+        }
+        .padding(.top, 22)
+        .padding(.bottom, 8)
+    }
+
     var isReady: Bool { ipaURL != nil && store.hasCert }
 
     @ViewBuilder
@@ -546,10 +510,12 @@ struct SignView: View {
         if store.hasCert {
             HStack(spacing: 14) {
                 Image(systemName: "key.fill")
-                    .font(.title2)
+                    .font(.system(size: 20, weight: .semibold))
                     .foregroundColor(t.accent)
-                    .frame(width: 32)
-                VStack(alignment: .leading, spacing: 4) {
+                    .frame(width: 46, height: 46)
+                    .background(t.accent.opacity(0.16),
+                                in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                VStack(alignment: .leading, spacing: 3) {
                     Text(store.tr("Сертификат", "Certificate"))
                         .font(.headline)
                         .foregroundColor(t.text)
@@ -559,19 +525,23 @@ struct SignView: View {
                         .lineLimit(1)
                 }
                 Spacer()
-                Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.title3)
+                    .foregroundColor(.green)
             }
-            .cardStyle(t)
+            .glassCard(t)
         } else {
             Button {
-                tab = 2
+                tab = 3
             } label: {
                 HStack(spacing: 14) {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.title2)
+                        .font(.system(size: 20, weight: .semibold))
                         .foregroundColor(.orange)
-                        .frame(width: 32)
-                    VStack(alignment: .leading, spacing: 4) {
+                        .frame(width: 46, height: 46)
+                        .background(Color.orange.opacity(0.16),
+                                    in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                    VStack(alignment: .leading, spacing: 3) {
                         Text(store.tr("Нет сертификата", "No certificate"))
                             .font(.headline)
                             .foregroundColor(t.text)
@@ -580,9 +550,10 @@ struct SignView: View {
                             .foregroundColor(t.subtext)
                     }
                     Spacer()
-                    Image(systemName: "chevron.right").foregroundColor(t.subtext)
+                    Image(systemName: "chevron.right")
+                        .foregroundColor(t.subtext)
                 }
-                .cardStyle(t)
+                .glassCard(t)
             }
             .buttonStyle(.plain)
         }
@@ -652,7 +623,7 @@ struct SignView: View {
 struct SignedView: View {
     @EnvironmentObject var store: AppStore
     @State private var errorText: String?
-    var t: AppTheme { store.theme }
+    var t: Palette { store.palette }
 
     var body: some View {
         ZStack {
@@ -660,36 +631,37 @@ struct SignedView: View {
             ScrollView {
                 VStack(spacing: 14) {
                     Text(store.tr("Подписанные", "Signed"))
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
+                        .font(.system(size: 34, weight: .bold, design: .rounded))
                         .foregroundColor(t.text)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 24)
+                        .padding(.top, 20)
 
                     if let errorText {
                         Text(errorText)
                             .font(.subheadline)
                             .foregroundColor(.red)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .cardStyle(t)
+                            .glassCard(t)
                     }
 
                     if store.signed.isEmpty {
-                        VStack(spacing: 10) {
+                        VStack(spacing: 12) {
                             Image(systemName: "tray")
-                                .font(.system(size: 44))
+                                .font(.system(size: 48))
                                 .foregroundColor(t.subtext)
                             Text(store.tr("Пока пусто", "Nothing here yet"))
                                 .foregroundColor(t.subtext)
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.top, 80)
+                        .padding(.top, 90)
                     }
 
                     ForEach(store.signed) { item in
                         row(item)
                     }
                 }
-                .padding()
+                .padding(.horizontal, 18)
+                .padding(.bottom, 110)
             }
         }
     }
@@ -706,13 +678,15 @@ struct SignedView: View {
     }
 
     func row(_ item: SignedItem) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 14) {
                 Image(systemName: "shippingbox.fill")
-                    .font(.title2)
+                    .font(.system(size: 20, weight: .semibold))
                     .foregroundColor(t.accent)
-                    .frame(width: 32)
-                VStack(alignment: .leading, spacing: 4) {
+                    .frame(width: 46, height: 46)
+                    .background(t.accent.opacity(0.16),
+                                in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                VStack(alignment: .leading, spacing: 3) {
                     Text(item.name)
                         .font(.headline)
                         .foregroundColor(t.text)
@@ -721,11 +695,12 @@ struct SignedView: View {
                         .font(.caption)
                         .foregroundColor(t.subtext)
                     Text(item.isSigned ? store.tr("Подписан", "Signed") : store.tr("Не подписан (старая версия)", "Not signed (old version)"))
-                        .font(.caption)
+                        .font(.caption.weight(.medium))
                         .foregroundColor(item.isSigned ? .green : .orange)
                 }
                 Spacer()
             }
+
             HStack(spacing: 10) {
                 Button {
                     install(item)
@@ -734,33 +709,35 @@ struct SignedView: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(t.accent)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .padding(.vertical, 14)
+                        .glassButton(t.accent)
                         .opacity(item.bundleID == nil ? 0.4 : 1)
                 }
+                .buttonStyle(.plain)
                 .disabled(item.bundleID == nil)
 
                 ShareLink(item: store.url(for: item)) {
                     Image(systemName: "square.and.arrow.up")
-                        .foregroundColor(t.accent)
-                        .padding(10)
-                        .background(t.accent.opacity(0.15))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(t.text)
+                        .frame(width: 48, height: 48)
+                        .glassButton(nil)
                 }
+                .buttonStyle(.plain)
 
                 Button {
                     store.delete(item)
                 } label: {
                     Image(systemName: "trash")
+                        .font(.system(size: 17, weight: .semibold))
                         .foregroundColor(.red)
-                        .padding(10)
-                        .background(Color.red.opacity(0.15))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .frame(width: 48, height: 48)
+                        .glassButton(nil)
                 }
+                .buttonStyle(.plain)
             }
         }
-        .cardStyle(t)
+        .glassCard(t)
     }
 }
 
@@ -773,19 +750,25 @@ struct SettingsView: View {
     @State private var checkMessage: String?
     @State private var checkOK = false
     @State private var showPassword = false
+    @State private var themeTab = 0
 
-    var t: AppTheme { store.theme }
+    var t: Palette { store.palette }
+
+    static let accentPresets: [String] = [
+        "B359FF", "4D9AFF", "34D1BF", "30D158",
+        "FFD60A", "FF9F0A", "FF453A", "FF5FA2"
+    ]
 
     var body: some View {
         ZStack {
             ThemedBackground()
             ScrollView {
-                VStack(spacing: 16) {
+                VStack(spacing: 14) {
                     Text(store.tr("Настройки", "Settings"))
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
+                        .font(.system(size: 34, weight: .bold, design: .rounded))
                         .foregroundColor(t.text)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 24)
+                        .padding(.top, 20)
 
                     sectionTitle(store.tr("Сертификат", "Certificate"))
 
@@ -806,9 +789,11 @@ struct SettingsView: View {
 
                     HStack(spacing: 14) {
                         Image(systemName: "lock.fill")
-                            .font(.title2)
+                            .font(.system(size: 20, weight: .semibold))
                             .foregroundColor(t.accent)
-                            .frame(width: 32)
+                            .frame(width: 46, height: 46)
+                            .background(t.accent.opacity(0.16),
+                                        in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                         Group {
                             if showPassword {
                                 TextField(text: $store.password,
@@ -829,7 +814,7 @@ struct SettingsView: View {
                                 .foregroundColor(t.subtext)
                         }
                     }
-                    .cardStyle(t)
+                    .glassCard(t)
 
                     if let info = store.profileInfo() {
                         let expired = info.expires < Date()
@@ -841,7 +826,7 @@ struct SettingsView: View {
                                 .foregroundColor(expired ? .red : t.text)
                             Spacer()
                         }
-                        .cardStyle(t)
+                        .glassCard(t)
                     }
 
                     if let checkMessage {
@@ -849,14 +834,14 @@ struct SettingsView: View {
                             .font(.subheadline)
                             .foregroundColor(checkOK ? .green : .red)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .cardStyle(t)
+                            .glassCard(t)
                     }
                     if let errorText {
                         Text(errorText)
                             .font(.subheadline)
                             .foregroundColor(.red)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .cardStyle(t)
+                            .glassCard(t)
                     }
 
                     HStack(spacing: 12) {
@@ -869,10 +854,11 @@ struct SettingsView: View {
                                 .font(.headline)
                                 .foregroundColor(.white)
                                 .frame(maxWidth: .infinity)
-                                .padding()
-                                .background(t.accent)
-                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                                .padding(.vertical, 16)
+                                .glassButton(t.accent)
                         }
+                        .buttonStyle(.plain)
+
                         Button {
                             store.resetCert()
                             checkMessage = nil
@@ -880,10 +866,11 @@ struct SettingsView: View {
                             Text(store.tr("Удалить", "Delete"))
                                 .font(.headline)
                                 .foregroundColor(.red)
-                                .padding()
-                                .background(Color.red.opacity(0.15))
-                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                                .padding(.horizontal, 26)
+                                .padding(.vertical, 16)
+                                .glassButton(nil)
                         }
+                        .buttonStyle(.plain)
                     }
 
                     sectionTitle(store.tr("Язык", "Language"))
@@ -896,18 +883,28 @@ struct SettingsView: View {
 
                     sectionTitle(store.tr("Тема", "Theme"))
 
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 12)], spacing: 12) {
-                        ForEach(AppTheme.allCases) { theme in
-                            themeTile(theme)
+                    VStack(spacing: 16) {
+                        Picker("", selection: $themeTab) {
+                            Text(store.tr("Цвет интерфейса", "Interface")).tag(0)
+                            Text(store.tr("Цвет кнопок", "Buttons")).tag(1)
+                        }
+                        .pickerStyle(.segmented)
+
+                        if themeTab == 0 {
+                            interfaceColors
+                        } else {
+                            buttonColors
                         }
                     }
+                    .glassCard(t)
 
                     Text("OpSign 1.0")
                         .font(.caption)
                         .foregroundColor(t.subtext)
-                        .padding(.top, 16)
+                        .padding(.top, 10)
                 }
-                .padding()
+                .padding(.horizontal, 18)
+                .padding(.bottom, 110)
             }
         }
         .sheet(item: $picking) { kind in
@@ -928,57 +925,162 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: Помощники
+
     func sectionTitle(_ text: String) -> some View {
         Text(text.uppercased())
             .font(.caption.weight(.semibold))
             .foregroundColor(t.subtext)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 8)
+            .padding(.top, 10)
+            .padding(.leading, 6)
+    }
+
+    func hexBinding(_ keyPath: ReferenceWritableKeyPath<AppStore, String>) -> Binding<Color> {
+        Binding(
+            get: { Color(hex: store[keyPath: keyPath]) },
+            set: { store[keyPath: keyPath] = $0.hexString }
+        )
     }
 
     func languageTile(_ l: AppLanguage) -> some View {
-        Button {
+        let selected = store.lang == l
+        return Button {
             store.lang = l
         } label: {
             HStack(spacing: 8) {
                 Text(l.title)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundColor(t.text)
-                if store.lang == l {
-                    Image(systemName: "checkmark.circle.fill").foregroundColor(t.accent)
+                    .foregroundColor(selected ? .white : t.text)
+                if selected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.white)
                 }
             }
             .frame(maxWidth: .infinity)
-            .cardStyle(t)
+            .padding(.vertical, 16)
+            .glassButton(selected ? t.accent : nil)
         }
         .buttonStyle(.plain)
     }
 
-    func themeTile(_ theme: AppTheme) -> some View {
-        Button {
-            store.theme = theme
-        } label: {
-            VStack(spacing: 8) {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(LinearGradient(colors: theme.colors, startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(height: 64)
-                    .overlay(
-                        Circle().fill(theme.accent).frame(width: 22, height: 22)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.gray.opacity(0.4), lineWidth: 1)
-                    )
-                HStack(spacing: 6) {
-                    Text(theme.title(store.lang))
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundColor(t.text)
-                    if store.theme == theme {
-                        Image(systemName: "checkmark.circle.fill").foregroundColor(t.accent)
-                    }
-                }
+    // MARK: Цвет интерфейса
+
+    @ViewBuilder
+    var interfaceColors: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 12)], spacing: 14) {
+            ForEach(AppTheme.allCases) { preset in
+                presetTile(preset)
             }
-            .cardStyle(t)
+            customTile
+        }
+
+        if store.bgChoice == "custom" {
+            VStack(spacing: 6) {
+                ColorPicker(store.tr("Верхний цвет", "Top color"),
+                            selection: hexBinding(\.bgHex1), supportsOpacity: false)
+                ColorPicker(store.tr("Нижний цвет", "Bottom color"),
+                            selection: hexBinding(\.bgHex2), supportsOpacity: false)
+            }
+            .font(.subheadline)
+            .foregroundColor(t.text)
+        }
+    }
+
+    func presetTile(_ preset: AppTheme) -> some View {
+        let selected = store.bgChoice == preset.rawValue
+        return Button {
+            store.bgChoice = preset.rawValue
+        } label: {
+            VStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(LinearGradient(colors: preset.colors, startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(height: 62)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(selected ? t.accent : Color.gray.opacity(0.35),
+                                    lineWidth: selected ? 3 : 1)
+                    )
+                Text(preset.title(store.lang))
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(t.text)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    var customTile: some View {
+        let selected = store.bgChoice == "custom"
+        return Button {
+            store.bgChoice = "custom"
+        } label: {
+            VStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(LinearGradient(colors: [Color(hex: store.bgHex1), Color(hex: store.bgHex2)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(height: 62)
+                    .overlay(
+                        Image(systemName: "paintpalette.fill")
+                            .font(.title3)
+                            .foregroundColor(.white.opacity(0.9))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(selected ? t.accent : Color.gray.opacity(0.35),
+                                    lineWidth: selected ? 3 : 1)
+                    )
+                Text(store.tr("Свой", "Custom"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(t.text)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: Цвет кнопок
+
+    @ViewBuilder
+    var buttonColors: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 52), spacing: 14)], spacing: 14) {
+            ForEach(SettingsView.accentPresets, id: \.self) { hex in
+                swatch(hex)
+            }
+        }
+
+        ColorPicker(store.tr("Свой цвет кнопок", "Custom button color"),
+                    selection: hexBinding(\.accentHex), supportsOpacity: false)
+            .font(.subheadline)
+            .foregroundColor(t.text)
+
+        HStack(spacing: 8) {
+            Image(systemName: "sparkles")
+            Text(store.tr("Так выглядят кнопки", "This is how buttons look"))
+        }
+        .font(.subheadline.weight(.semibold))
+        .foregroundColor(.white)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 16)
+        .glassButton(t.accent, interactive: false)
+    }
+
+    func swatch(_ hex: String) -> some View {
+        let selected = store.accentHex.uppercased() == hex
+        return Button {
+            store.accentHex = hex
+        } label: {
+            Circle()
+                .fill(Color(hex: hex))
+                .frame(width: 46, height: 46)
+                .overlay(
+                    Circle().stroke(Color.white.opacity(0.9), lineWidth: selected ? 3 : 0)
+                )
+                .overlay(
+                    Image(systemName: "checkmark")
+                        .font(.caption.bold())
+                        .foregroundColor(.white)
+                        .opacity(selected ? 1 : 0)
+                )
+                .shadow(color: Color(hex: hex).opacity(0.5), radius: 6)
         }
         .buttonStyle(.plain)
     }
