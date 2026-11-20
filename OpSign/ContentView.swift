@@ -219,6 +219,9 @@ struct SignedItem: Codable, Identifiable {
     var date: Date
     var size: Int64
     var isSigned: Bool
+    var bundleID: String? = nil
+    var appName: String? = nil
+    var version: String? = nil
 }
 
 struct AppError: LocalizedError {
@@ -245,6 +248,8 @@ final class AppStore: ObservableObject {
     @Published var signed: [SignedItem] = [] {
         didSet { persistSigned() }
     }
+
+    var installServer: InstallServer?
 
     init() {
         let d = UserDefaults.standard
@@ -352,11 +357,12 @@ final class AppStore: ObservableObject {
         return (signedDir.appendingPathComponent(fileName), name)
     }
 
-    func registerSigned(url: URL, name: String) {
+    func registerSigned(url: URL, name: String, info: SignedInfo) {
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
         let item = SignedItem(name: name, fileName: url.lastPathComponent,
-                              date: Date(), size: size, isSigned: true)
+                              date: Date(), size: size, isSigned: true,
+                              bundleID: info.bundleID, appName: info.name, version: info.version)
         signed.insert(item, at: 0)
     }
 
@@ -370,6 +376,33 @@ final class AppStore: ObservableObject {
             UserDefaults.standard.set(data, forKey: "signed")
         }
     }
+
+    // MARK: Установка
+
+    func beginInstall(item: SignedItem) async throws {
+        guard let bundleID = item.bundleID else {
+            throw AppError(message: tr("У этого файла нет данных для установки. Подпиши приложение заново.",
+                                       "This file has no install data. Sign the app again."))
+        }
+        let file = url(for: item)
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            throw AppError(message: tr("Файл не найден. Подпиши приложение заново.",
+                                       "The file was not found. Sign the app again."))
+        }
+
+        installServer?.stop()
+        let server = InstallServer()
+        installServer = server
+
+        let page = try await server.start(ipa: file,
+                                          bundleID: bundleID,
+                                          name: item.appName ?? item.name,
+                                          version: item.version ?? "1.0")
+        await MainActor.run {
+            server.keepAlive()
+            InstallServer.presentSafari(page)
+        }
+    }
 }
 
 // MARK: - Главный экран с вкладками
@@ -381,7 +414,7 @@ struct ContentView: View {
     var body: some View {
         TabView(selection: $tab) {
             SignView(tab: $tab)
-                .tabItem { Label(store.tr("Подпись", "Sign"), systemImage: "checkmark.seal.fill") }
+                .tabItem { Label(store.tr("Установка", "Install"), systemImage: "arrow.down.app.fill") }
                 .tag(0)
             SignedView()
                 .tabItem { Label(store.tr("Подписанные", "Signed"), systemImage: "tray.full.fill") }
@@ -394,7 +427,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Вкладка «Подпись»
+// MARK: - Вкладка «Установка»
 
 struct SignView: View {
     @EnvironmentObject var store: AppStore
@@ -406,6 +439,7 @@ struct SignView: View {
     @State private var progress = 0.0
     @State private var stepText = ""
     @State private var errorText: String?
+    @State private var infoText: String?
 
     var t: AppTheme { store.theme }
 
@@ -418,7 +452,7 @@ struct SignView: View {
                         .font(.system(size: 38, weight: .bold, design: .rounded))
                         .foregroundColor(t.text)
                         .padding(.top, 24)
-                    Text(store.tr("Подпись приложений", "App signing"))
+                    Text(store.tr("Подпись и установка приложений", "App signing & installing"))
                         .font(.subheadline)
                         .foregroundColor(t.subtext)
                         .padding(.bottom, 8)
@@ -444,6 +478,14 @@ struct SignView: View {
                         .cardStyle(t)
                     }
 
+                    if let infoText {
+                        Text(infoText)
+                            .font(.subheadline)
+                            .foregroundColor(.green)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .cardStyle(t)
+                    }
+
                     if let errorText {
                         Text(errorText)
                             .font(.subheadline)
@@ -452,8 +494,10 @@ struct SignView: View {
                             .cardStyle(t)
                     }
 
-                    Button(action: startSign) {
-                        Text(working ? store.tr("Подождите…", "Please wait…") : store.tr("Подписать", "Sign"))
+                    Button {
+                        startSign(install: true)
+                    } label: {
+                        Text(working ? store.tr("Подождите…", "Please wait…") : store.tr("Установить", "Install"))
                             .font(.headline)
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
@@ -467,6 +511,17 @@ struct SignView: View {
                     }
                     .disabled(!isReady || working)
                     .padding(.top, 8)
+
+                    Button {
+                        startSign(install: false)
+                    } label: {
+                        Text(store.tr("Только подписать", "Sign only"))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundColor(t.accent)
+                            .padding(.vertical, 6)
+                            .opacity(isReady ? 1 : 0.4)
+                    }
+                    .disabled(!isReady || working)
                 }
                 .padding()
             }
@@ -533,9 +588,10 @@ struct SignView: View {
         }
     }
 
-    func startSign() {
+    func startSign(install: Bool) {
         guard let ipa = ipaURL else { return }
         errorText = nil
+        infoText = nil
         working = true
         progress = 0.02
         stepText = store.tr("Старт…", "Starting…")
@@ -556,18 +612,30 @@ struct SignView: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try Signer.sign(ipa: ipa, p12: p12, password: pass, profile: profile,
-                                outURL: output.url, lang: lang) { text, p in
+                let result = try Signer.sign(ipa: ipa, p12: p12, password: pass, profile: profile,
+                                             outURL: output.url, lang: lang) { text, p in
                     DispatchQueue.main.async {
                         stepText = text
                         progress = p
                     }
                 }
                 DispatchQueue.main.async {
-                    store.registerSigned(url: output.url, name: output.name)
+                    store.registerSigned(url: output.url, name: output.name, info: result)
                     ipaURL = nil
                     working = false
-                    tab = 1
+                    if install, let item = store.signed.first {
+                        infoText = store.tr("Готово! Файл сохранён во вкладке «Подписанные». Запускаю установку…",
+                                            "Done! The file is saved in “Signed”. Starting installation…")
+                        Task { @MainActor in
+                            do {
+                                try await store.beginInstall(item: item)
+                            } catch {
+                                errorText = error.localizedDescription
+                            }
+                        }
+                    } else {
+                        tab = 1
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -583,6 +651,7 @@ struct SignView: View {
 
 struct SignedView: View {
     @EnvironmentObject var store: AppStore
+    @State private var errorText: String?
     var t: AppTheme { store.theme }
 
     var body: some View {
@@ -595,6 +664,14 @@ struct SignedView: View {
                         .foregroundColor(t.text)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 24)
+
+                    if let errorText {
+                        Text(errorText)
+                            .font(.subheadline)
+                            .foregroundColor(.red)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .cardStyle(t)
+                    }
 
                     if store.signed.isEmpty {
                         VStack(spacing: 10) {
@@ -613,6 +690,17 @@ struct SignedView: View {
                     }
                 }
                 .padding()
+            }
+        }
+    }
+
+    func install(_ item: SignedItem) {
+        errorText = nil
+        Task { @MainActor in
+            do {
+                try await store.beginInstall(item: item)
+            } catch {
+                errorText = error.localizedDescription
             }
         }
     }
@@ -638,16 +726,29 @@ struct SignedView: View {
                 }
                 Spacer()
             }
-            HStack(spacing: 12) {
-                ShareLink(item: store.url(for: item)) {
-                    Label(store.tr("Сохранить / Поделиться", "Save / Share"), systemImage: "square.and.arrow.up")
+            HStack(spacing: 10) {
+                Button {
+                    install(item)
+                } label: {
+                    Label(store.tr("Установить", "Install"), systemImage: "arrow.down.app.fill")
                         .font(.subheadline.weight(.semibold))
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
                         .background(t.accent)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .opacity(item.bundleID == nil ? 0.4 : 1)
                 }
+                .disabled(item.bundleID == nil)
+
+                ShareLink(item: store.url(for: item)) {
+                    Image(systemName: "square.and.arrow.up")
+                        .foregroundColor(t.accent)
+                        .padding(10)
+                        .background(t.accent.opacity(0.15))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+
                 Button {
                     store.delete(item)
                 } label: {
