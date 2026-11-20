@@ -1,9 +1,8 @@
 import Foundation
 import Network
-import WebKit
 import UIKit
 
-/// Маленький локальный сервер: отдаёт подписанный IPA и страницу, которая запускает установку.
+/// Маленький локальный сервер: отдаёт подписанный IPA и запускает системную установку iOS.
 final class InstallServer {
     private let queue = DispatchQueue(label: "opsign.install.server")
     private var listener: NWListener?
@@ -12,8 +11,8 @@ final class InstallServer {
     private var pageHTML = ""
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
 
-    // Невидимый браузер, который запускает установку
-    private static var hiddenWebView: WKWebView?
+    /// Ссылка itms-services, которую открывает presentSafari (системное окно установки)
+    private static var pendingInstallLink: URL?
 
     // MARK: Запуск
 
@@ -63,6 +62,9 @@ final class InstallServer {
         let plistURL = "https://api.palera.in/genPlist?bundleid=\(enc(bundleID))&name=\(enc(name))&version=\(enc(version))&fetchurl=\(ipaURL)"
         let itms = "itms-services://?action=download-manifest&url=\(enc(plistURL))"
 
+        // Запоминаем ссылку: presentSafari откроет её напрямую
+        InstallServer.pendingInstallLink = URL(string: itms)
+
         pageHTML = makeHTML(itms: itms)
         return URL(string: "http://127.0.0.1:\(port)/install")!
     }
@@ -90,7 +92,7 @@ final class InstallServer {
         }
     }
 
-    // MARK: Страница, которая сразу запускает установку
+    // MARK: Запасная страница (на случай ручного открытия /install)
 
     private func makeHTML(itms: String) -> String {
         let attr = itms.replacingOccurrences(of: "&", with: "&amp;")
@@ -235,20 +237,22 @@ final class InstallServer {
         })
     }
 
-    // MARK: Невидимый браузер (название оставлено прежним, чтобы не менять другие файлы)
+    // MARK: Системное окно установки iOS
+    // Название оставлено прежним, чтобы не менять другие файлы.
+    // Параметр url игнорируется, если есть готовая itms-services ссылка.
 
     static func presentSafari(_ url: URL) {
-        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
-              let window = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first else { return }
+        let target: URL
+        if let itms = pendingInstallLink {
+            target = itms
+        } else if url.scheme == "itms-services" {
+            target = url
+        } else {
+            return
+        }
 
-        hiddenWebView?.removeFromSuperview()
-
-        let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: 2, height: 2),
-                           configuration: WKWebViewConfiguration())
-        wv.alpha = 0.01
-        wv.isUserInteractionEnabled = false
-        window.addSubview(wv)
-        wv.load(URLRequest(url: url))
-        hiddenWebView = wv
+        DispatchQueue.main.async {
+            UIApplication.shared.open(target, options: [:], completionHandler: nil)
+        }
     }
 }
