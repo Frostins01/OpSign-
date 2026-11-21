@@ -1,19 +1,6 @@
 import SwiftUI
 import UIKit
 
-// MARK: - Настройка Liquid Glass (включается в Настройках)
-
-struct GlassEnabledKey: EnvironmentKey {
-    static let defaultValue: Bool = true
-}
-
-extension EnvironmentValues {
-    var glassEnabled: Bool {
-        get { self[GlassEnabledKey.self] }
-        set { self[GlassEnabledKey.self] = newValue }
-    }
-}
-
 // MARK: - Цвета
 
 extension Color {
@@ -100,30 +87,18 @@ struct PressStyle: ButtonStyle {
     }
 }
 
-// MARK: - Поверхность: Liquid Glass или объёмный «плоский» стиль
+// MARK: - Liquid Glass
 
 struct GlassSurface: ViewModifier {
     let shape: AnyShape
     var tint: Color? = nil
     var interactive: Bool = false
 
-    @Environment(\.glassEnabled) private var glassOn
-    @Environment(\.colorScheme) private var scheme
-
     func body(content: Content) -> some View {
-        if glassOn {
-            glassBody(content)
-        } else {
-            flatBody(content)
-        }
-    }
-
-    // Стекло
-    @ViewBuilder
-    private func glassBody(_ content: Content) -> some View {
         if #available(iOS 26.0, *) {
             content.glassEffect(makeGlass(), in: shape)
         } else {
+            // Запасной вариант для iOS ниже 26
             if let tint {
                 content.background(
                     LinearGradient(colors: [tint, tint.opacity(0.7)],
@@ -145,55 +120,16 @@ struct GlassSurface: ViewModifier {
         if interactive { g = g.interactive() }
         return g
     }
-
-    // Без стекла: объёмные карточки с бликом, обводкой и тенью
-    @ViewBuilder
-    private func flatBody(_ content: Content) -> some View {
-        let dark = scheme == .dark
-        if let tint {
-            content
-                .background(
-                    ZStack {
-                        shape.fill(LinearGradient(colors: [tint, tint.opacity(0.78)],
-                                                  startPoint: .topLeading, endPoint: .bottomTrailing))
-                        shape.fill(LinearGradient(colors: [Color.white.opacity(0.28), Color.clear],
-                                                  startPoint: .top, endPoint: .center))
-                    }
-                )
-                .overlay(
-                    shape.stroke(LinearGradient(colors: [Color.white.opacity(0.55), Color.white.opacity(0.05)],
-                                                startPoint: .top, endPoint: .bottom),
-                                 lineWidth: 1)
-                )
-                .shadow(color: tint.opacity(0.45), radius: 12, x: 0, y: 6)
-        } else {
-            content
-                .background(
-                    ZStack {
-                        shape.fill(dark ? Color.white.opacity(0.08) : Color.white.opacity(0.88))
-                        shape.fill(LinearGradient(colors: [Color.white.opacity(dark ? 0.07 : 0.55), Color.clear],
-                                                  startPoint: .top, endPoint: .center))
-                    }
-                )
-                .overlay(
-                    shape.stroke(LinearGradient(colors: [Color.white.opacity(dark ? 0.24 : 0.95),
-                                                         Color.white.opacity(dark ? 0.04 : 0.2)],
-                                                startPoint: .top, endPoint: .bottom),
-                                 lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(dark ? 0.35 : 0.10), radius: 14, x: 0, y: 6)
-        }
-    }
 }
 
 extension View {
-    /// Карточка (стекло или объёмный стиль)
+    /// Стеклянная карточка
     func glassCard(_ p: Palette, radius: CGFloat = 26, padding: CGFloat = 16) -> some View {
         self.padding(padding)
             .modifier(GlassSurface(shape: AnyShape(RoundedRectangle(cornerRadius: radius, style: .continuous))))
     }
 
-    /// Капсула / круг для кнопок
+    /// Стеклянная капсула / круг (для кнопок)
     func glassButton(_ tint: Color?, interactive: Bool = false) -> some View {
         self.modifier(GlassSurface(shape: AnyShape(Capsule()), tint: tint, interactive: interactive))
     }
