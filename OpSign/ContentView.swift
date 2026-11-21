@@ -150,10 +150,6 @@ final class AppStore: ObservableObject {
     @Published var accentHex: String {
         didSet { UserDefaults.standard.set(accentHex, forKey: "accentHex") }
     }
-    // Liquid Glass вкл/выкл
-    @Published var glassEnabled: Bool {
-        didSet { UserDefaults.standard.set(glassEnabled, forKey: "glassEnabled") }
-    }
 
     @Published var lang: AppLanguage {
         didSet { UserDefaults.standard.set(lang.rawValue, forKey: "lang") }
@@ -181,7 +177,6 @@ final class AppStore: ObservableObject {
         bgHex1 = d.string(forKey: "bgHex1") ?? "0D0D26"
         bgHex2 = d.string(forKey: "bgHex2") ?? "2E0F59"
         accentHex = d.string(forKey: "accentHex") ?? "B359FF"
-        glassEnabled = (d.object(forKey: "glassEnabled") as? Bool) ?? true
 
         if let saved = AppLanguage(rawValue: d.string(forKey: "lang") ?? "") {
             lang = saved
@@ -196,6 +191,7 @@ final class AppStore: ObservableObject {
            let items = try? JSONDecoder().decode([SignedItem].self, from: data) {
             signed = items
         }
+        pruneMissing()
     }
 
     // Палитра приложения
@@ -321,6 +317,33 @@ final class AppStore: ObservableObject {
         signed.removeAll { $0.id == item.id }
     }
 
+    /// Удаляет все подписанные файлы (только внутри приложения, по нажатию пользователя)
+    func deleteAllSigned() {
+        for item in signed {
+            try? FileManager.default.removeItem(at: url(for: item))
+        }
+        signed.removeAll()
+    }
+
+    /// Убирает из списка записи, чьих файлов уже нет на диске
+    func pruneMissing() {
+        let fm = FileManager.default
+        let alive = signed.filter { fm.fileExists(atPath: url(for: $0).path) }
+        if alive.count != signed.count {
+            signed = alive
+        }
+    }
+
+    /// Удаляет временную копию IPA, которую создал выбор файла (оригинал не трогается)
+    func removeTemporaryCopy(_ url: URL) {
+        let fm = FileManager.default
+        let p = url.path
+        let inTemp = p.hasPrefix(fm.temporaryDirectory.path) || p.hasPrefix(NSTemporaryDirectory())
+        if inTemp || p.contains("/Inbox/") {
+            try? fm.removeItem(at: url)
+        }
+    }
+
     private func persistSigned() {
         if let data = try? JSONEncoder().encode(signed) {
             UserDefaults.standard.set(data, forKey: "signed")
@@ -346,36 +369,37 @@ final class AppStore: ObservableObject {
         return total
     }
 
-    /// Удаляет все подписанные файлы, список и временные данные. Сертификат остаётся.
+    /// Чистит ТОЛЬКО кэш приложения: временные файлы, системный кэш, копии из выбора файлов.
+    /// Подписанные файлы, список, сертификат и установленные приложения не затрагиваются.
     /// Возвращает, сколько байт освобождено.
     func clearCache() -> Int64 {
-        installServer?.stop()
-        installServer = nil
-
         let fm = FileManager.default
         var freed: Int64 = 0
 
-        freed += folderSize(signedDir)
-        try? fm.removeItem(at: signedDir)
-
-        let tmp = fm.temporaryDirectory
-        if let items = try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil) {
+        func wipe(_ dir: URL) {
+            guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
             for item in items {
                 freed += folderSize(item)
                 try? fm.removeItem(at: item)
             }
         }
 
+        wipe(fm.temporaryDirectory)
+        if let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            wipe(caches)
+        }
+
         let inbox = docsDir.appendingPathComponent("Inbox")
         freed += folderSize(inbox)
         try? fm.removeItem(at: inbox)
 
-        signed.removeAll()
+        URLCache.shared.removeAllCachedResponses()
         return freed
     }
 
     // MARK: Установка
 
+    @MainActor
     func beginInstall(item: SignedItem) async throws {
         guard let bundleID = item.bundleID else {
             throw AppError(message: tr("У этого файла нет данных для установки. Подпиши приложение заново.",
@@ -395,10 +419,8 @@ final class AppStore: ObservableObject {
                                           bundleID: bundleID,
                                           name: item.appName ?? item.name,
                                           version: item.version ?? "1.0")
-        await MainActor.run {
-            server.keepAlive()
-            InstallServer.presentSafari(page)
-        }
+        server.keepAlive()
+        InstallServer.presentSafari(page)
     }
 }
 
@@ -424,7 +446,6 @@ struct ContentView: View {
                 .tag(3)
         }
         .tint(store.palette.accent)
-        .environment(\.glassEnabled, store.glassEnabled)
     }
 }
 
@@ -533,6 +554,7 @@ struct SignView: View {
                 if PickKind.ipa.accepts(url) {
                     ipaURL = url
                     errorText = nil
+                    infoText = nil
                 } else {
                     errorText = store.tr("Нужен файл с расширением .ipa", "A file with the .ipa extension is required")
                 }
@@ -546,8 +568,8 @@ struct SignView: View {
             }
             Button(store.tr("Отмена", "Cancel"), role: .cancel) {}
         } message: {
-            Text(store.tr("Будут удалены все подписанные файлы и временные данные. Сертификат останется. Уже установленные приложения нужно удалять с экрана «Домой» вручную.",
-                          "All signed files and temporary data will be deleted. Your certificate stays. Apps that are already installed must be removed from the Home Screen manually."))
+            Text(store.tr("Будут удалены только временные файлы и кэш приложения. Подписанные файлы, сертификат и установленные приложения останутся. Подписанные файлы можно удалить во вкладке «Подписанные».",
+                          "Only temporary files and the app cache will be deleted. Signed files, your certificate and installed apps stay. Signed files can be removed in the “Signed” tab."))
         }
     }
 
@@ -577,10 +599,16 @@ struct SignView: View {
 
     func clearCache() {
         let freed = store.clearCache()
-        ipaURL = nil
+        if let u = ipaURL, !FileManager.default.fileExists(atPath: u.path) {
+            ipaURL = nil
+        }
         errorText = nil
-        let size = ByteCountFormatter.string(fromByteCount: freed, countStyle: .file)
-        infoText = store.tr("Кэш очищен. Освобождено: \(size).", "Cache cleared. Freed: \(size).")
+        if freed > 0 {
+            let size = ByteCountFormatter.string(fromByteCount: freed, countStyle: .file)
+            infoText = store.tr("Кэш очищен. Освобождено: \(size).", "Cache cleared. Freed: \(size).")
+        } else {
+            infoText = store.tr("Кэш уже пуст.", "The cache is already empty.")
+        }
     }
 
     var header: some View {
@@ -692,6 +720,7 @@ struct SignView: View {
                 }
                 DispatchQueue.main.async {
                     store.registerSigned(url: output.url, name: output.name, info: result)
+                    store.removeTemporaryCopy(ipa)
                     ipaURL = nil
                     working = false
                     if install, let item = store.signed.first {
@@ -723,6 +752,7 @@ struct SignView: View {
 struct SignedView: View {
     @EnvironmentObject var store: AppStore
     @State private var errorText: String?
+    @State private var showDeleteAll = false
     var t: Palette { store.palette }
 
     var body: some View {
@@ -730,11 +760,29 @@ struct SignedView: View {
             ThemedBackground()
             ScrollView {
                 VStack(spacing: 14) {
-                    Text(store.tr("Подписанные", "Signed"))
-                        .font(.system(size: 34, weight: .bold, design: .rounded))
-                        .foregroundColor(t.text)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 20)
+                    HStack {
+                        Text(store.tr("Подписанные", "Signed"))
+                            .font(.system(size: 34, weight: .bold, design: .rounded))
+                            .foregroundColor(t.text)
+                        Spacer()
+                        if !store.signed.isEmpty {
+                            Button {
+                                showDeleteAll = true
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "trash")
+                                    Text(store.tr("Удалить все", "Delete all"))
+                                }
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundColor(.red)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 12)
+                                .glassButton(nil)
+                            }
+                            .buttonStyle(PressStyle())
+                        }
+                    }
+                    .padding(.top, 20)
 
                     if let errorText {
                         Text(errorText)
@@ -763,6 +811,18 @@ struct SignedView: View {
                 .padding(.horizontal, 18)
                 .padding(.bottom, 110)
             }
+        }
+        .onAppear { store.pruneMissing() }
+        .confirmationDialog(store.tr("Удалить все подписанные файлы?", "Delete all signed files?"),
+                            isPresented: $showDeleteAll,
+                            titleVisibility: .visible) {
+            Button(store.tr("Удалить все", "Delete all"), role: .destructive) {
+                store.deleteAllSigned()
+            }
+            Button(store.tr("Отмена", "Cancel"), role: .cancel) {}
+        } message: {
+            Text(store.tr("Файлы будут удалены из приложения. Уже установленные приложения не пострадают.",
+                          "The files will be removed from the app. Already installed apps are not affected."))
         }
     }
 
@@ -977,32 +1037,6 @@ struct SettingsView: View {
                         .buttonStyle(PressStyle())
                     }
 
-                    sectionTitle(store.tr("Стиль", "Style"))
-
-                    HStack(spacing: 14) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 20, weight: .semibold))
-                            .foregroundColor(t.accent)
-                            .frame(width: 46, height: 46)
-                            .background(t.accent.opacity(0.16),
-                                        in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("Liquid Glass")
-                                .font(.headline)
-                                .foregroundColor(t.text)
-                            Text(store.tr("Выключи, если не нравится эффект стекла. Интерфейс останется красивым.",
-                                          "Turn off if you don't like the glass effect. The interface stays beautiful."))
-                                .font(.caption)
-                                .foregroundColor(t.subtext)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $store.glassEnabled)
-                            .labelsHidden()
-                            .tint(t.accent)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .glassCard(t)
-
                     sectionTitle(store.tr("Язык", "Language"))
 
                     HStack(spacing: 12) {
@@ -1047,6 +1081,7 @@ struct SettingsView: View {
                 }
                 do {
                     try store.importFile(url, kind: kind)
+                    store.removeTemporaryCopy(url)
                     errorText = nil
                     checkMessage = nil
                 } catch {
