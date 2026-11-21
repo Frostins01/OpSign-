@@ -150,6 +150,10 @@ final class AppStore: ObservableObject {
     @Published var accentHex: String {
         didSet { UserDefaults.standard.set(accentHex, forKey: "accentHex") }
     }
+    // Liquid Glass вкл/выкл
+    @Published var glassEnabled: Bool {
+        didSet { UserDefaults.standard.set(glassEnabled, forKey: "glassEnabled") }
+    }
 
     @Published var lang: AppLanguage {
         didSet { UserDefaults.standard.set(lang.rawValue, forKey: "lang") }
@@ -177,6 +181,7 @@ final class AppStore: ObservableObject {
         bgHex1 = d.string(forKey: "bgHex1") ?? "0D0D26"
         bgHex2 = d.string(forKey: "bgHex2") ?? "2E0F59"
         accentHex = d.string(forKey: "accentHex") ?? "B359FF"
+        glassEnabled = (d.object(forKey: "glassEnabled") as? Bool) ?? true
 
         if let saved = AppLanguage(rawValue: d.string(forKey: "lang") ?? "") {
             lang = saved
@@ -322,6 +327,53 @@ final class AppStore: ObservableObject {
         }
     }
 
+    // MARK: Очистка кэша
+
+    private func folderSize(_ url: URL) -> Int64 {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return 0 }
+        if !isDir.boolValue {
+            let attrs = try? fm.attributesOfItem(atPath: url.path)
+            return (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+        }
+        var total: Int64 = 0
+        if let en = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey], options: []) {
+            for case let f as URL in en {
+                total += Int64((try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            }
+        }
+        return total
+    }
+
+    /// Удаляет все подписанные файлы, список и временные данные. Сертификат остаётся.
+    /// Возвращает, сколько байт освобождено.
+    func clearCache() -> Int64 {
+        installServer?.stop()
+        installServer = nil
+
+        let fm = FileManager.default
+        var freed: Int64 = 0
+
+        freed += folderSize(signedDir)
+        try? fm.removeItem(at: signedDir)
+
+        let tmp = fm.temporaryDirectory
+        if let items = try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil) {
+            for item in items {
+                freed += folderSize(item)
+                try? fm.removeItem(at: item)
+            }
+        }
+
+        let inbox = docsDir.appendingPathComponent("Inbox")
+        freed += folderSize(inbox)
+        try? fm.removeItem(at: inbox)
+
+        signed.removeAll()
+        return freed
+    }
+
     // MARK: Установка
 
     func beginInstall(item: SignedItem) async throws {
@@ -372,6 +424,7 @@ struct ContentView: View {
                 .tag(3)
         }
         .tint(store.palette.accent)
+        .environment(\.glassEnabled, store.glassEnabled)
     }
 }
 
@@ -388,6 +441,7 @@ struct SignView: View {
     @State private var stepText = ""
     @State private var errorText: String?
     @State private var infoText: String?
+    @State private var showClearConfirm = false
 
     var t: Palette { store.palette }
 
@@ -396,6 +450,7 @@ struct SignView: View {
             ThemedBackground()
             ScrollView {
                 VStack(spacing: 14) {
+                    clearBar
                     header
 
                     FileCard(theme: t,
@@ -444,13 +499,13 @@ struct SignView: View {
                             Text(working ? store.tr("Подождите…", "Please wait…") : store.tr("Установить", "Install"))
                         }
                         .font(.headline)
-                        .foregroundColor(.white)
+                        .foregroundColor(t.onAccent)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 18)
                         .glassButton(t.accent)
                         .opacity(isReady ? 1 : 0.45)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PressStyle())
                     .disabled(!isReady || working)
                     .padding(.top, 6)
 
@@ -460,12 +515,12 @@ struct SignView: View {
                         Text(store.tr("Только подписать", "Sign only"))
                             .font(.subheadline.weight(.semibold))
                             .foregroundColor(t.text)
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 12)
+                            .padding(.horizontal, 28)
+                            .padding(.vertical, 14)
                             .glassButton(nil)
                             .opacity(isReady ? 1 : 0.45)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PressStyle())
                     .disabled(!isReady || working)
                 }
                 .padding(.horizontal, 18)
@@ -483,13 +538,56 @@ struct SignView: View {
                 }
             }
         }
+        .confirmationDialog(store.tr("Очистить кэш?", "Clear cache?"),
+                            isPresented: $showClearConfirm,
+                            titleVisibility: .visible) {
+            Button(store.tr("Очистить", "Clear"), role: .destructive) {
+                clearCache()
+            }
+            Button(store.tr("Отмена", "Cancel"), role: .cancel) {}
+        } message: {
+            Text(store.tr("Будут удалены все подписанные файлы и временные данные. Сертификат останется. Уже установленные приложения нужно удалять с экрана «Домой» вручную.",
+                          "All signed files and temporary data will be deleted. Your certificate stays. Apps that are already installed must be removed from the Home Screen manually."))
+        }
+    }
+
+    // Кнопка «Очистить кэш» в правом верхнем углу
+    var clearBar: some View {
+        HStack {
+            Spacer()
+            Button {
+                showClearConfirm = true
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "trash")
+                    Text(store.tr("Очистить кэш", "Clear cache"))
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(t.text)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 13)
+                .glassButton(nil)
+                .opacity(working ? 0.45 : 1)
+            }
+            .buttonStyle(PressStyle())
+            .disabled(working)
+        }
+        .padding(.top, 6)
+    }
+
+    func clearCache() {
+        let freed = store.clearCache()
+        ipaURL = nil
+        errorText = nil
+        let size = ByteCountFormatter.string(fromByteCount: freed, countStyle: .file)
+        infoText = store.tr("Кэш очищен. Освобождено: \(size).", "Cache cleared. Freed: \(size).")
     }
 
     var header: some View {
         VStack(spacing: 10) {
             Image(systemName: "checkmark.shield.fill")
                 .font(.system(size: 34, weight: .semibold))
-                .foregroundColor(.white)
+                .foregroundColor(t.onAccent)
                 .frame(width: 76, height: 76)
                 .glassButton(t.accent, interactive: false)
             Text("OpSign")
@@ -499,7 +597,7 @@ struct SignView: View {
                 .font(.subheadline)
                 .foregroundColor(t.subtext)
         }
-        .padding(.top, 22)
+        .padding(.top, 6)
         .padding(.bottom, 8)
     }
 
@@ -529,6 +627,7 @@ struct SignView: View {
                     .font(.title3)
                     .foregroundColor(.green)
             }
+            .frame(maxWidth: .infinity)
             .glassCard(t)
         } else {
             Button {
@@ -553,9 +652,10 @@ struct SignView: View {
                     Image(systemName: "chevron.right")
                         .foregroundColor(t.subtext)
                 }
+                .frame(maxWidth: .infinity)
                 .glassCard(t)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PressStyle())
         }
     }
 
@@ -707,23 +807,23 @@ struct SignedView: View {
                 } label: {
                     Label(store.tr("Установить", "Install"), systemImage: "arrow.down.app.fill")
                         .font(.subheadline.weight(.semibold))
-                        .foregroundColor(.white)
+                        .foregroundColor(t.onAccent)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
+                        .padding(.vertical, 15)
                         .glassButton(t.accent)
                         .opacity(item.bundleID == nil ? 0.4 : 1)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressStyle())
                 .disabled(item.bundleID == nil)
 
                 ShareLink(item: store.url(for: item)) {
                     Image(systemName: "square.and.arrow.up")
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundColor(t.text)
-                        .frame(width: 48, height: 48)
+                        .frame(width: 52, height: 52)
                         .glassButton(nil)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressStyle())
 
                 Button {
                     store.delete(item)
@@ -731,10 +831,10 @@ struct SignedView: View {
                     Image(systemName: "trash")
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundColor(.red)
-                        .frame(width: 48, height: 48)
+                        .frame(width: 52, height: 52)
                         .glassButton(nil)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressStyle())
             }
         }
         .glassCard(t)
@@ -812,8 +912,11 @@ struct SettingsView: View {
                         } label: {
                             Image(systemName: showPassword ? "eye.slash.fill" : "eye.fill")
                                 .foregroundColor(t.subtext)
+                                .frame(width: 44, height: 44)
                         }
+                        .buttonStyle(PressStyle())
                     }
+                    .frame(maxWidth: .infinity)
                     .glassCard(t)
 
                     if let info = store.profileInfo() {
@@ -826,6 +929,7 @@ struct SettingsView: View {
                                 .foregroundColor(expired ? .red : t.text)
                             Spacer()
                         }
+                        .frame(maxWidth: .infinity)
                         .glassCard(t)
                     }
 
@@ -852,12 +956,12 @@ struct SettingsView: View {
                         } label: {
                             Text(store.tr("Проверить", "Check"))
                                 .font(.headline)
-                                .foregroundColor(.white)
+                                .foregroundColor(t.onAccent)
                                 .frame(maxWidth: .infinity)
-                                .padding(.vertical, 16)
+                                .padding(.vertical, 17)
                                 .glassButton(t.accent)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PressStyle())
 
                         Button {
                             store.resetCert()
@@ -866,12 +970,38 @@ struct SettingsView: View {
                             Text(store.tr("Удалить", "Delete"))
                                 .font(.headline)
                                 .foregroundColor(.red)
-                                .padding(.horizontal, 26)
-                                .padding(.vertical, 16)
+                                .padding(.horizontal, 28)
+                                .padding(.vertical, 17)
                                 .glassButton(nil)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PressStyle())
                     }
+
+                    sectionTitle(store.tr("Стиль", "Style"))
+
+                    HStack(spacing: 14) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundColor(t.accent)
+                            .frame(width: 46, height: 46)
+                            .background(t.accent.opacity(0.16),
+                                        in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Liquid Glass")
+                                .font(.headline)
+                                .foregroundColor(t.text)
+                            Text(store.tr("Выключи, если не нравится эффект стекла. Интерфейс останется красивым.",
+                                          "Turn off if you don't like the glass effect. The interface stays beautiful."))
+                                .font(.caption)
+                                .foregroundColor(t.subtext)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $store.glassEnabled)
+                            .labelsHidden()
+                            .tint(t.accent)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .glassCard(t)
 
                     sectionTitle(store.tr("Язык", "Language"))
 
@@ -896,6 +1026,7 @@ struct SettingsView: View {
                             buttonColors
                         }
                     }
+                    .frame(maxWidth: .infinity)
                     .glassCard(t)
 
                     Text("OpSign 1.0")
@@ -951,17 +1082,17 @@ struct SettingsView: View {
             HStack(spacing: 8) {
                 Text(l.title)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundColor(selected ? .white : t.text)
+                    .foregroundColor(selected ? t.onAccent : t.text)
                 if selected {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.white)
+                        .foregroundColor(t.onAccent)
                 }
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 16)
+            .padding(.vertical, 17)
             .glassButton(selected ? t.accent : nil)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
     }
 
     // MARK: Цвет интерфейса
@@ -1006,7 +1137,7 @@ struct SettingsView: View {
                     .foregroundColor(t.text)
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
     }
 
     var customTile: some View {
@@ -1034,7 +1165,7 @@ struct SettingsView: View {
                     .foregroundColor(t.text)
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
     }
 
     // MARK: Цвет кнопок
@@ -1057,7 +1188,7 @@ struct SettingsView: View {
             Text(store.tr("Так выглядят кнопки", "This is how buttons look"))
         }
         .font(.subheadline.weight(.semibold))
-        .foregroundColor(.white)
+        .foregroundColor(t.onAccent)
         .frame(maxWidth: .infinity)
         .padding(.vertical, 16)
         .glassButton(t.accent, interactive: false)
@@ -1081,7 +1212,8 @@ struct SettingsView: View {
                         .opacity(selected ? 1 : 0)
                 )
                 .shadow(color: Color(hex: hex).opacity(0.5), radius: 6)
+                .frame(width: 52, height: 52)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
     }
 }
