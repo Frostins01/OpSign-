@@ -127,7 +127,12 @@ enum Signer {
         let fm = FileManager.default
         let work = fm.temporaryDirectory.appendingPathComponent("opsign_" + UUID().uuidString)
         try fm.createDirectory(at: work, withIntermediateDirectories: true)
-        defer { try? fm.removeItem(at: work) }
+
+        let originalDir = fm.currentDirectoryPath
+        defer {
+            fm.changeCurrentDirectoryPath(originalDir)
+            try? fm.removeItem(at: work)
+        }
 
         report(tr(lang, "Чтение сертификата…", "Reading certificate…"), 0.05)
         let p12Data = try Data(contentsOf: p12)
