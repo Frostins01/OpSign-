@@ -1,6 +1,19 @@
 import SwiftUI
 import UIKit
 
+// MARK: - Настройка Liquid Glass (включается в Настройках)
+
+struct GlassEnabledKey: EnvironmentKey {
+    static let defaultValue: Bool = true
+}
+
+extension EnvironmentValues {
+    var glassEnabled: Bool {
+        get { self[GlassEnabledKey.self] }
+        set { self[GlassEnabledKey.self] = newValue }
+    }
+}
+
 // MARK: - Цвета
 
 extension Color {
@@ -70,16 +83,44 @@ struct Palette {
     var scheme: ColorScheme { isLight ? .light : .dark }
     var text: Color { isLight ? Color(white: 0.08) : .white }
     var subtext: Color { text.opacity(0.6) }
+    /// Цвет текста на кнопках: тёмный на светлых цветах, белый на тёмных
+    var onAccent: Color { accent.luminance > 0.72 ? Color(white: 0.08) : .white }
 }
 
-// MARK: - Liquid Glass
+// MARK: - Стиль нажатия (вся площадь кнопки + анимация)
+
+struct PressStyle: ButtonStyle {
+    var scale: CGFloat = 0.96
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .contentShape(Rectangle())
+            .scaleEffect(configuration.isPressed ? scale : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+    }
+}
+
+// MARK: - Поверхность: Liquid Glass или объёмный «плоский» стиль
 
 struct GlassSurface: ViewModifier {
     let shape: AnyShape
     var tint: Color? = nil
     var interactive: Bool = false
 
+    @Environment(\.glassEnabled) private var glassOn
+    @Environment(\.colorScheme) private var scheme
+
     func body(content: Content) -> some View {
+        if glassOn {
+            glassBody(content)
+        } else {
+            flatBody(content)
+        }
+    }
+
+    // Стекло
+    @ViewBuilder
+    private func glassBody(_ content: Content) -> some View {
         if #available(iOS 26.0, *) {
             content.glassEffect(makeGlass(), in: shape)
         } else {
@@ -104,17 +145,56 @@ struct GlassSurface: ViewModifier {
         if interactive { g = g.interactive() }
         return g
     }
+
+    // Без стекла: объёмные карточки с бликом, обводкой и тенью
+    @ViewBuilder
+    private func flatBody(_ content: Content) -> some View {
+        let dark = scheme == .dark
+        if let tint {
+            content
+                .background(
+                    ZStack {
+                        shape.fill(LinearGradient(colors: [tint, tint.opacity(0.78)],
+                                                  startPoint: .topLeading, endPoint: .bottomTrailing))
+                        shape.fill(LinearGradient(colors: [Color.white.opacity(0.28), Color.clear],
+                                                  startPoint: .top, endPoint: .center))
+                    }
+                )
+                .overlay(
+                    shape.stroke(LinearGradient(colors: [Color.white.opacity(0.55), Color.white.opacity(0.05)],
+                                                startPoint: .top, endPoint: .bottom),
+                                 lineWidth: 1)
+                )
+                .shadow(color: tint.opacity(0.45), radius: 12, x: 0, y: 6)
+        } else {
+            content
+                .background(
+                    ZStack {
+                        shape.fill(dark ? Color.white.opacity(0.08) : Color.white.opacity(0.88))
+                        shape.fill(LinearGradient(colors: [Color.white.opacity(dark ? 0.07 : 0.55), Color.clear],
+                                                  startPoint: .top, endPoint: .center))
+                    }
+                )
+                .overlay(
+                    shape.stroke(LinearGradient(colors: [Color.white.opacity(dark ? 0.24 : 0.95),
+                                                         Color.white.opacity(dark ? 0.04 : 0.2)],
+                                                startPoint: .top, endPoint: .bottom),
+                                 lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(dark ? 0.35 : 0.10), radius: 14, x: 0, y: 6)
+        }
+    }
 }
 
 extension View {
-    /// Стеклянная карточка
+    /// Карточка (стекло или объёмный стиль)
     func glassCard(_ p: Palette, radius: CGFloat = 26, padding: CGFloat = 16) -> some View {
         self.padding(padding)
             .modifier(GlassSurface(shape: AnyShape(RoundedRectangle(cornerRadius: radius, style: .continuous))))
     }
 
-    /// Стеклянная капсула / круг (для кнопок)
-    func glassButton(_ tint: Color?, interactive: Bool = true) -> some View {
+    /// Капсула / круг для кнопок
+    func glassButton(_ tint: Color?, interactive: Bool = false) -> some View {
         self.modifier(GlassSurface(shape: AnyShape(Capsule()), tint: tint, interactive: interactive))
     }
 }
@@ -176,8 +256,9 @@ struct FileCard: View {
                     .font(.title3)
                     .foregroundColor(done ? .green : theme.subtext)
             }
+            .frame(maxWidth: .infinity)
             .glassCard(theme)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
     }
 }
