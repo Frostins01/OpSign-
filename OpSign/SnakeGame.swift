@@ -39,35 +39,6 @@ enum SnakeState {
     case idle, running, paused, over
 }
 
-enum SnakeLevel: String, CaseIterable, Identifiable {
-    case easy, normal, hard
-    var id: String { rawValue }
-
-    var baseInterval: Double {
-        switch self {
-        case .easy: return 0.20
-        case .normal: return 0.15
-        case .hard: return 0.11
-        }
-    }
-
-    var minInterval: Double {
-        switch self {
-        case .easy: return 0.11
-        case .normal: return 0.08
-        case .hard: return 0.055
-        }
-    }
-
-    func title(_ lang: AppLanguage) -> String {
-        switch self {
-        case .easy: return lang == .ru ? "Легко" : "Easy"
-        case .normal: return lang == .ru ? "Норма" : "Normal"
-        case .hard: return lang == .ru ? "Сложно" : "Hard"
-        }
-    }
-}
-
 final class SnakeModel: ObservableObject {
     let cols = 15
     let rows = 15
@@ -82,35 +53,19 @@ final class SnakeModel: ObservableObject {
     @Published var dir: SnakeDir = .right
     @Published var newRecord = false
 
-    @Published var level: SnakeLevel {
-        didSet {
-            UserDefaults.standard.set(level.rawValue, forKey: "snakeLevel")
-            best = UserDefaults.standard.integer(forKey: bestKey)
-        }
-    }
-
-    @Published var wrap: Bool {
-        didSet {
-            UserDefaults.standard.set(wrap, forKey: "snakeWrap")
-            best = UserDefaults.standard.integer(forKey: bestKey)
-        }
-    }
+    // Данные для плавной анимации между шагами
+    private(set) var fromPositions: [CGPoint] = []
+    private(set) var lastTick: Double = 0
+    private(set) var stepInterval: Double = 0.15
+    private var frozenProgress: Double = 1
 
     private var applesEaten = 0
     private var timer: Timer?
     private let impact = UIImpactFeedbackGenerator(style: .light)
-
-    private var bestKey: String {
-        "snakeBest_\(level.rawValue)_\(wrap ? "w" : "n")"
-    }
+    private let bestKey = "snakeBest_normal_n"
 
     init() {
-        let d = UserDefaults.standard
-        let lvl = SnakeLevel(rawValue: d.string(forKey: "snakeLevel") ?? "") ?? .normal
-        let w = d.bool(forKey: "snakeWrap")
-        level = lvl
-        wrap = w
-        best = d.integer(forKey: "snakeBest_\(lvl.rawValue)_\(w ? "w" : "n")")
+        best = UserDefaults.standard.integer(forKey: bestKey)
         reset()
     }
 
@@ -126,18 +81,21 @@ final class SnakeModel: ObservableObject {
         bonusLeft = 0
         newRecord = false
         placeFood()
+        syncPositions()
         state = .idle
     }
 
     func start() {
         if state == .over { reset() }
         impact.prepare()
+        syncPositions()
         state = .running
         scheduleTimer()
     }
 
     func pause() {
         if state == .running {
+            frozenProgress = progress(at: CACurrentMediaTime())
             state = .paused
             stopTimer()
         }
@@ -148,8 +106,9 @@ final class SnakeModel: ObservableObject {
         case .running:
             pause()
         case .paused:
+            lastTick = CACurrentMediaTime() - frozenProgress * stepInterval
             state = .running
-            scheduleTimer()
+            scheduleTimer(firstDelay: max(0.01, (1 - frozenProgress) * stepInterval))
         case .idle, .over:
             start()
         }
@@ -165,14 +124,64 @@ final class SnakeModel: ObservableObject {
         if state == .running { scheduleTimer() }
     }
 
+    // MARK: Плавное движение
+
+    private func currentInterval() -> Double {
+        max(0.08, 0.15 - Double(score) * 0.0025)
+    }
+
+    private func syncPositions() {
+        fromPositions = snake.map { CGPoint(x: CGFloat($0.x), y: CGFloat($0.y)) }
+        stepInterval = currentInterval()
+        lastTick = CACurrentMediaTime()
+        frozenProgress = 1
+    }
+
+    func progress(at now: Double) -> Double {
+        switch state {
+        case .running:
+            return min(1, max(0, (now - lastTick) / stepInterval))
+        case .paused:
+            return frozenProgress
+        default:
+            return 1
+        }
+    }
+
+    /// Положение каждого звена змеи (в клетках, дробное) между двумя шагами
+    func positions(at now: Double) -> [CGPoint] {
+        let p = CGFloat(progress(at: now))
+        var result: [CGPoint] = []
+        result.reserveCapacity(snake.count)
+        for (i, target) in snake.enumerated() {
+            let tx = CGFloat(target.x)
+            let ty = CGFloat(target.y)
+            let from: CGPoint
+            if i < fromPositions.count {
+                from = fromPositions[i]
+            } else if let last = fromPositions.last {
+                from = last
+            } else {
+                from = CGPoint(x: tx, y: ty)
+            }
+            result.append(CGPoint(x: from.x + (tx - from.x) * p,
+                                  y: from.y + (ty - from.y) * p))
+        }
+        return result
+    }
+
     // MARK: Таймер
 
-    private func scheduleTimer() {
+    private func scheduleTimer(firstDelay: Double? = nil) {
         stopTimer()
-        let interval = max(level.minInterval, level.baseInterval - Double(score) * 0.0025)
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            self?.tick()
+        let delay = firstDelay ?? currentInterval()
+        let t = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.tick()
+            if self.state == .running { self.scheduleTimer() }
         }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 
     private func stopTimer() {
@@ -185,13 +194,13 @@ final class SnakeModel: ObservableObject {
     private func tick() {
         guard state == .running, let head = snake.first else { return }
 
-        var nx = head.x + dir.dx
-        var ny = head.y + dir.dy
+        let now = CACurrentMediaTime()
+        let visual = positions(at: now)
 
-        if wrap {
-            nx = (nx + cols) % cols
-            ny = (ny + rows) % rows
-        } else if nx < 0 || nx >= cols || ny < 0 || ny >= rows {
+        let nx = head.x + dir.dx
+        let ny = head.y + dir.dy
+
+        if nx < 0 || nx >= cols || ny < 0 || ny >= rows {
             gameOver()
             return
         }
@@ -208,6 +217,7 @@ final class SnakeModel: ObservableObject {
         }
 
         snake.insert(next, at: 0)
+        if !grows { snake.removeLast() }
 
         if eatsFood {
             score += 1
@@ -215,15 +225,11 @@ final class SnakeModel: ObservableObject {
             impact.impactOccurred()
             placeFood()
             if applesEaten % 5 == 0 { placeBonus() }
-            scheduleTimer()
         } else if eatsBonus {
             score += 3
             bonus = nil
             bonusLeft = 0
             UINotificationFeedbackGenerator().notificationOccurred(.success)
-            scheduleTimer()
-        } else {
-            snake.removeLast()
         }
 
         if bonus != nil {
@@ -233,6 +239,10 @@ final class SnakeModel: ObservableObject {
                 bonusLeft = 0
             }
         }
+
+        fromPositions = visual
+        lastTick = now
+        stepInterval = currentInterval()
     }
 
     private func gameOver() {
@@ -311,6 +321,7 @@ struct PadButton: View {
 
 struct GamesView: View {
     @EnvironmentObject var store: AppStore
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = SnakeModel()
     @State private var swipeOrigin: CGPoint? = nil
 
@@ -343,6 +354,9 @@ struct GamesView: View {
         .contentShape(Rectangle())
         .gesture(swipe)
         .onDisappear { model.pause() }
+        .onChange(of: scenePhase) { phase in
+            if phase != .active { model.pause() }
+        }
     }
 
     // MARK: Свайп по любому месту экрана (срабатывает сразу при движении пальца)
@@ -396,13 +410,13 @@ struct GamesView: View {
         .glassButton(nil)
     }
 
-    // MARK: Поле
+    // MARK: Поле (перерисовывается с частотой экрана, движение плавное)
 
     func board(side: CGFloat) -> some View {
         ZStack {
-            TimelineView(.animation) { timeline in
+            TimelineView(.animation(minimumInterval: nil, paused: model.state != .running)) { _ in
                 Canvas { ctx, size in
-                    drawBoard(&ctx, size, timeline.date.timeIntervalSinceReferenceDate)
+                    drawBoard(&ctx, size, CACurrentMediaTime())
                 }
             }
 
@@ -439,6 +453,10 @@ struct GamesView: View {
             CGPoint(x: (CGFloat(p.x) + 0.5) * cw, y: (CGFloat(p.y) + 0.5) * ch)
         }
 
+        func centerF(_ p: CGPoint) -> CGPoint {
+            CGPoint(x: (p.x + 0.5) * cw, y: (p.y + 0.5) * ch)
+        }
+
         // Яблоко
         let fc = center(model.food)
         let glowR = cell * CGFloat(0.72 + 0.16 * pulse)
@@ -469,36 +487,32 @@ struct GamesView: View {
             }
         }
 
-        // Змея: от хвоста к голове
-        let pts = model.snake
+        // Змея: плавное движение между клетками
+        let pts = model.positions(at: time)
         let n = pts.count
         let bodyW = cell * 0.78
 
-        for i in stride(from: n - 1, through: 0, by: -1) {
-            let p = pts[i]
-            let frac = n > 1 ? Double(i) / Double(n - 1) : 0
-            let color = t.accent.opacity(1.0 - 0.55 * frac)
-            let c = center(p)
+        let ui = UIColor(t.accent)
+        var cr: CGFloat = 0, cg: CGFloat = 0, cb: CGFloat = 0, ca: CGFloat = 0
+        ui.getRed(&cr, green: &cg, blue: &cb, alpha: &ca)
 
-            if i < n - 1 {
-                let q = pts[i + 1]
-                if abs(q.x - p.x) <= 1 && abs(q.y - p.y) <= 1 {
-                    let c2 = center(q)
-                    let r = CGRect(x: min(c.x, c2.x) - bodyW / 2,
-                                   y: min(c.y, c2.y) - bodyW / 2,
-                                   width: abs(c.x - c2.x) + bodyW,
-                                   height: abs(c.y - c2.y) + bodyW)
-                    ctx.fill(Path(roundedRect: r, cornerRadius: bodyW * 0.4), with: .color(color))
-                }
+        // Тело от хвоста к голове; цвет плавно темнеет к хвосту
+        if n > 1 {
+            for i in stride(from: n - 1, through: 1, by: -1) {
+                let frac = CGFloat(i) / CGFloat(n - 1)
+                let f = 1.0 - 0.42 * frac
+                let color = Color(red: Double(cr * f), green: Double(cg * f), blue: Double(cb * f))
+                var path = Path()
+                path.move(to: centerF(pts[i]))
+                path.addLine(to: centerF(pts[i - 1]))
+                ctx.stroke(path, with: .color(color),
+                           style: StrokeStyle(lineWidth: bodyW, lineCap: .round, lineJoin: .round))
             }
-
-            let r = CGRect(x: c.x - bodyW / 2, y: c.y - bodyW / 2, width: bodyW, height: bodyW)
-            ctx.fill(Path(roundedRect: r, cornerRadius: bodyW * 0.42), with: .color(color))
         }
 
         // Голова с глазами
-        if let head = pts.first {
-            let hc = center(head)
+        if let first = pts.first {
+            let hc = centerF(first)
             let hw = bodyW * 1.1
             ctx.fill(Path(roundedRect: CGRect(x: hc.x - hw / 2, y: hc.y - hw / 2, width: hw, height: hw),
                           cornerRadius: hw * 0.45),
@@ -533,22 +547,6 @@ struct GamesView: View {
                 .font(.subheadline)
                 .foregroundColor(t.subtext)
                 .multilineTextAlignment(.center)
-
-            if model.state != .paused {
-                Picker("", selection: $model.level) {
-                    ForEach(SnakeLevel.allCases) { l in
-                        Text(l.title(store.lang)).tag(l)
-                    }
-                }
-                .pickerStyle(.segmented)
-
-                Toggle(isOn: $model.wrap) {
-                    Text(store.tr("Без стен", "No walls"))
-                        .font(.subheadline.weight(.medium))
-                        .foregroundColor(t.text)
-                }
-                .tint(t.accent)
-            }
 
             Button {
                 model.toggle()
